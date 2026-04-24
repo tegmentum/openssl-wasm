@@ -4,10 +4,17 @@
 
 # Editor integration
 /compile_commands.json
+/.cache/
 
 # Fetched test fixtures (Mozilla CA bundle; reproducible via
 # scripts/fetch-mozilla-ca.sh).
 /examples/host/fixtures/
+
+# cargo-fuzz output.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/Cargo.lock
 *.wasm
 *.o
 *.a
@@ -17,9 +24,9 @@
 /src/bindings/
 /src/stubs.c
 
-# Rust
+# Rust: ignore build output but keep Cargo.lock for binary-crate
+# reproducibility.
 examples/**/target/
-examples/**/Cargo.lock
 
 # OpenSSL in-tree build artifacts (submodule)
 /third_party/openssl/configdata.pm
