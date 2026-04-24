@@ -1,0 +1,64 @@
+name: Bench
+
+# Weekly cadence — benches are too noisy on shared runners to be
+# useful per-PR, but a weekly trend line is valuable.
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Mondays 09:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install wasi-sdk
+        run: |
+          bash scripts/install-wasi-sdk.sh
+          echo "WASI_SDK=$PWD/.wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Install wasm-tools + wit-bindgen
+        run: |
+          cargo install --locked wasm-tools@1.247.0
+          cargo install --locked wit-bindgen-cli@0.48.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build component
+        run: make component
+
+      - name: Run benchmarks
+        run: |
+          cd examples/host
+          OPENSSL_WASM_COMPONENT=$GITHUB_WORKSPACE/build/openssl-component.wasm \
+            cargo bench --bench component_vs_native 2>&1 \
+            | tee "$GITHUB_STEP_SUMMARY.raw"
+
+      - name: Summarize for GitHub
+        run: |
+          {
+            echo "## Bench results ($(date -u))"
+            echo ""
+            echo '```'
+            cat examples/host/target/criterion/*/*/new/estimates.json \
+              | python3 -c '
+import json, sys, os, glob
+for f in sorted(glob.glob("examples/host/target/criterion/*/*/new/estimates.json")
+                + glob.glob("examples/host/target/criterion/*/*/*/new/estimates.json")):
+    d = json.load(open(f))
+    ns = d["mean"]["point_estimate"]
+    name = f.removeprefix("examples/host/target/criterion/").removesuffix("/new/estimates.json")
+    print(f"{name:48s}  {ns/1e3:12.2f} us/iter")
+'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload criterion results
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: examples/host/target/criterion/
+          if-no-files-found: error

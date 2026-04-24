@@ -1,0 +1,81 @@
+name: Fuzz
+
+# Weekly cadence — each target runs for ~15 minutes. Any crashes are
+# uploaded as artifacts and cause the job to fail (so you get an email).
+on:
+  schedule:
+    - cron: '0 11 * * 0'  # Sundays 11:00 UTC
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: 'Fuzz duration per target (seconds)'
+        required: false
+        default: '900'
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - cert_parse
+          - csr_parse
+          - crl_parse
+          - pkey_load_private
+          - cms_verify
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install wasi-sdk
+        run: |
+          bash scripts/install-wasi-sdk.sh
+          echo "WASI_SDK=$PWD/.wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Install wasm-tools + wit-bindgen
+        run: |
+          cargo install --locked wasm-tools@1.247.0
+          cargo install --locked wit-bindgen-cli@0.48.1
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Build component
+        run: make component
+
+      - name: Restore corpus cache
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzz campaign
+        env:
+          OPENSSL_WASM_COMPONENT: ${{ github.workspace }}/build/openssl-component.wasm
+        run: |
+          duration="${{ github.event.inputs.duration_seconds || '900' }}"
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time="$duration" \
+            -rss_limit_mb=4096
+
+      - name: Upload corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore
+
+      - name: Upload any crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
