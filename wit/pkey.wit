@@ -103,6 +103,26 @@ interface pkey {
         generator: u32,
     }
 
+    /// Standardized DH groups. These are the safe primes every real
+    /// deployment uses (TLS FFDHE per RFC 7919, IPsec MODP per RFC 3526);
+    /// use these whenever possible because fresh prime generation is
+    /// both slow (>2 min per call on wasm) and a security footgun if
+    /// the caller forgets to demand a safe prime.
+    enum dh-group {
+        /// RFC 7919 — TLS finite-field DH groups.
+        ffdhe2048,
+        ffdhe3072,
+        ffdhe4096,
+        ffdhe6144,
+        ffdhe8192,
+        /// RFC 3526 — IKE/IPsec MODP groups.
+        modp2048,
+        modp3072,
+        modp4096,
+        modp6144,
+        modp8192,
+    }
+
     variant keygen-params {
         rsa(rsa-keygen),
         rsa-pss(rsa-keygen),
@@ -110,6 +130,10 @@ interface pkey {
         ed(edwards-curve),
         x(montgomery-curve),
         dh(dh-keygen),
+        /// Generate a DH keypair in a standardized group. Orders of
+        /// magnitude faster than `dh` — no prime search, just scalar
+        /// multiplication.
+        dh-named(dh-group),
     }
 
     record load-options {

@@ -14,6 +14,14 @@ component, callable from wasmtime ≥ 44 through a curated WIT surface.
 ### Added
 - Component surface covering `error`, `random`, `bignum`, `digest`,
   `mac`, `cipher`, `kdf`, `pkey`, `x509`, `tls` (256 exports total).
+- `pkey.keygen-params.dh-named(dh-group)` — DH keygen against
+  standardized safe primes (RFC 7919 `ffdhe2048…ffdhe8192`,
+  RFC 3526 `modp2048…modp8192`). No prime search, so keygen is
+  bounded by one modular exponentiation instead of a full
+  Miller-Rabin search. A full 2-party FFDHE-2048 agreement test
+  runs in ~15 s on wasm (vs. 5+ minutes for the fresh-params path,
+  which stays available as `pkey.keygen-params.dh(dh-keygen)` for
+  the few callers who actually want it).
 - `tls` client and server with TLS 1.2 / 1.3, ALPN, SNI, session
   tickets, keylog (wired through `SSL_CTX_set_keylog_callback` and
   drainable per client/server resource), and system-CA chain
@@ -66,8 +74,11 @@ component, callable from wasmtime ≥ 44 through a curated WIT surface.
   TLS.
 - TLS server tests need `--test-threads=1` (implicit via criterion
   serial binding).
-- DH 2048-bit keygen is slow (>2 min per call on wasm); the test
-  is `#[ignore]` by default.
+- DH 2048-bit fresh-parameter generation (the
+  `pkey.keygen-params.dh(...)` path) is slow (>2 min per call on
+  wasm); the regression test is `#[ignore]` by default. Real
+  deployments should use `dh-named` against an RFC 7919 / RFC 3526
+  group instead — that path is fast enough for CI.
 - Portable-C AES is ~120× slower than native AES-NI. The SIMD AES
   opt-in path is correctness-complete but not yet a speed-up; see
   `README.md` § Wasm SIMD AES for the open work.

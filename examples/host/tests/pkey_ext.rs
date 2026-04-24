@@ -218,29 +218,54 @@ async fn has_private_differs_between_public_and_private() {
 }
 
 #[tokio::test]
-#[ignore = "DH 2048-bit param generation is slow (>2 min on wasm); run with `cargo test -- --ignored`"]
-async fn dh_keygen_and_derive_agree() {
-    // DH keygen is very slow in pure-software wasm (~2.5 min per call
-    // for 2048-bit). Opt-in only.
+async fn dh_named_ffdhe2048_agreement() {
+    // Two keypairs in the same RFC 7919 group share p,g — derive on
+    // either side produces the same shared secret. This is the
+    // real-world DH usage (TLS FFDHE), and it's fast because there's
+    // no prime search.
     let mut f = Fixture::new().await.unwrap();
     let pk = f.bindings.openssl_component_pkey().pkey();
     let a = pk.call_generate(&mut f.store,
-        pk::KeygenParams::Dh(pk::DhKeygen { prime_bits: 2048, generator: 2 }))
+        pk::KeygenParams::DhNamed(pk::DhGroup::Ffdhe2048))
         .await.unwrap().unwrap();
     let b = pk.call_generate(&mut f.store,
+        pk::KeygenParams::DhNamed(pk::DhGroup::Ffdhe2048))
+        .await.unwrap().unwrap();
+    let ss1 = pk.call_derive(&mut f.store, a, b).await.unwrap().unwrap();
+    let ss2 = pk.call_derive(&mut f.store, b, a).await.unwrap().unwrap();
+    assert_eq!(ss1, ss2);
+    assert_eq!(ss1.len(), 256);  // 2048-bit field element
+    assert!(pk.call_bits(&mut f.store, a).await.unwrap() >= 2048);
+}
+
+#[tokio::test]
+async fn dh_named_modp3072_agreement() {
+    // RFC 3526 MODP-3072 — the IPsec flavor. Validates the modp_*
+    // name-resolution path alongside the RFC 7919 ffdhe_* path.
+    let mut f = Fixture::new().await.unwrap();
+    let pk = f.bindings.openssl_component_pkey().pkey();
+    let a = pk.call_generate(&mut f.store,
+        pk::KeygenParams::DhNamed(pk::DhGroup::Modp3072))
+        .await.unwrap().unwrap();
+    let b = pk.call_generate(&mut f.store,
+        pk::KeygenParams::DhNamed(pk::DhGroup::Modp3072))
+        .await.unwrap().unwrap();
+    let ss = pk.call_derive(&mut f.store, a, b).await.unwrap().unwrap();
+    assert_eq!(ss.len(), 384);  // 3072-bit field element
+}
+
+#[tokio::test]
+#[ignore = "DH 2048-bit fresh prime generation is slow (>2 min on wasm); run with `cargo test -- --ignored`"]
+async fn dh_fresh_param_generation() {
+    // Opt-in regression check for the `dh(dh-keygen)` path that
+    // generates a fresh safe prime. Real deployments should use
+    // `dh-named` instead — this just keeps the slow path wired.
+    let mut f = Fixture::new().await.unwrap();
+    let pk = f.bindings.openssl_component_pkey().pkey();
+    let k = pk.call_generate(&mut f.store,
         pk::KeygenParams::Dh(pk::DhKeygen { prime_bits: 2048, generator: 2 }))
         .await.unwrap().unwrap();
-    // a and b have different prime parameters (each regenerates), so
-    // we cannot expect derivation agreement. Instead assert derive
-    // succeeds on same-param self-derivation: generate one key, clone,
-    // and derive a <- a itself (edge-case, should produce output).
-    // We assert that derive runs without error with both halves of a
-    // keypair. Full DH agreement across separate param generations
-    // would require exposing parameter sharing in the WIT, which we
-    // haven't — this test exercises the keygen + derive path end-to-end.
-    let bits = pk.call_bits(&mut f.store, a).await.unwrap();
-    assert!(bits >= 2048);
-    let _ = b;
+    assert!(pk.call_bits(&mut f.store, k).await.unwrap() >= 2048);
 }
 
 #[tokio::test]

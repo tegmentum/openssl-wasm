@@ -17,8 +17,9 @@ Rust in the repo is the test driver in `examples/host`.
 ## Status
 
 - All 256 WIT exports are implemented against real OpenSSL.
-- 104 automated tests in `examples/host/tests/` pass, including
-  NIST/RFC/FIPS 197 known-answer vectors.
+- 106 automated tests in `examples/host/tests/` pass (plus 1
+  opt-in `#[ignore]` slow-path test), including NIST/RFC/FIPS 197
+  known-answer vectors.
 - TLS client verified live against `example.com:443` with real
   certificate-chain validation against the system CA bundle.
 
@@ -32,7 +33,7 @@ Rust in the repo is the test driver in `examples/host`.
 | `mac`     | HMAC / CMAC / KMAC / Poly1305 / SipHash / GMAC |
 | `cipher`  | AES (ECB/CBC/CTR/CFB/OFB/XTS/GCM/CCM/OCB), ChaCha20-Poly1305, Camellia, ARIA, 3DES, RC4 |
 | `kdf`     | PBKDF2, HKDF, scrypt, Argon2, KBKDF, SSKDF, X9.63, TLS1.3-expand-label |
-| `pkey`    | RSA / RSA-PSS / EC / Ed25519,Ed448 / X25519,X448 / DH — keygen, sign/verify, encrypt/decrypt, derive, PEM/DER/PKCS#8 |
+| `pkey`    | RSA / RSA-PSS / EC / Ed25519,Ed448 / X25519,X448 / DH (+ named RFC 7919 / RFC 3526 groups) — keygen, sign/verify, encrypt/decrypt, derive, PEM/DER/PKCS#8 |
 | `x509`    | Certificates / CSRs / CRLs / Store / chain validation / PKCS#12 / CMS |
 | `tls`     | TLS 1.2 / 1.3 client and server, ALPN, SNI, session tickets, keylog |
 | `bignum`  | BIGNUM arithmetic |
@@ -60,7 +61,7 @@ Rust in the repo is the test driver in `examples/host`.
 ├── examples/host/             # Rust wasmtime harness
 │   ├── src/lib.rs             # Fixture + bindgen
 │   ├── src/main.rs            # demo runner
-│   └── tests/*.rs             # 22 suites, 104 tests total
+│   └── tests/*.rs             # 22 suites, 106 tests total (+1 ignored)
 ├── .github/workflows/ci.yml   # build + test on every push
 └── Makefile
 ```

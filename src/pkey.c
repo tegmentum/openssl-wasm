@@ -33,6 +33,7 @@
 #define KEYGEN_ED      EXPORTS_OPENSSL_COMPONENT_PKEY_KEYGEN_PARAMS_ED
 #define KEYGEN_X       EXPORTS_OPENSSL_COMPONENT_PKEY_KEYGEN_PARAMS_X
 #define KEYGEN_DH      EXPORTS_OPENSSL_COMPONENT_PKEY_KEYGEN_PARAMS_DH
+#define KEYGEN_DH_NAMED EXPORTS_OPENSSL_COMPONENT_PKEY_KEYGEN_PARAMS_DH_NAMED
 
 #define PAD_PKCS1      EXPORTS_OPENSSL_COMPONENT_PKEY_RSA_PADDING_PKCS1
 #define PAD_OAEP       EXPORTS_OPENSSL_COMPONENT_PKEY_RSA_PADDING_PKCS1_OAEP
@@ -74,6 +75,22 @@ static const char *edwards_name(exports_openssl_component_pkey_edwards_curve_t c
 
 static const char *montgomery_name(exports_openssl_component_pkey_montgomery_curve_t c) {
     return c == 0 ? "X25519" : (c == 1 ? "X448" : NULL);
+}
+
+static const char *dh_group_name(exports_openssl_component_pkey_dh_group_t g) {
+    switch (g) {
+    case 0: return "ffdhe2048";
+    case 1: return "ffdhe3072";
+    case 2: return "ffdhe4096";
+    case 3: return "ffdhe6144";
+    case 4: return "ffdhe8192";
+    case 5: return "modp_2048";
+    case 6: return "modp_3072";
+    case 7: return "modp_4096";
+    case 8: return "modp_6144";
+    case 9: return "modp_8192";
+    default: return NULL;
+    }
 }
 
 static inline EVP_PKEY *as_pkey(exports_openssl_component_pkey_borrow_pkey_t b) {
@@ -164,6 +181,22 @@ bool exports_openssl_component_pkey_static_pkey_generate(
         ctx = EVP_PKEY_CTX_new_from_pkey(NULL, pparams, NULL);
         EVP_PKEY_free(pparams);
         if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 ||
+            EVP_PKEY_keygen(ctx, &pkey) <= 0) goto fail;
+        break;
+    }
+    case KEYGEN_DH_NAMED: {
+        // Standardized safe prime → no search, just keygen against a
+        // built-in group. Fast because the provider already has p,g.
+        const char *group = dh_group_name(params->val.dh_named);
+        if (!group) { err->tag = PE_UNSUPPORTED_TYPE; return false; }
+        ctx = EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL);
+        if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0) goto fail;
+        OSSL_PARAM p[] = {
+            OSSL_PARAM_construct_utf8_string(
+                OSSL_PKEY_PARAM_GROUP_NAME, (char *)group, 0),
+            OSSL_PARAM_construct_end()
+        };
+        if (EVP_PKEY_CTX_set_params(ctx, p) <= 0 ||
             EVP_PKEY_keygen(ctx, &pkey) <= 0) goto fail;
         break;
     }
