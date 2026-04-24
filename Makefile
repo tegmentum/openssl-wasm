@@ -37,10 +37,14 @@ COMPONENT    := $(BUILD_DIR)/openssl-component.wasm
 
 NPROC        := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
-# size=min drops legacy ciphers/digests. About 1 MB smaller artifact.
-# Callers lose MD5/RIPEMD/BLAKE2/SM*/Camellia/ARIA/IDEA/RC2/RC5/SEED/MDC2.
+# size=min drops legacy ciphers/digests that aren't needed for modern
+# TLS and protocol use. Callers lose RIPEMD / BLAKE2 / SM* / Camellia /
+# ARIA / IDEA / RC2 / RC5 / SEED / MDC2 / Whirlpool / Cast / Blowfish.
+# Measured saving: ~230 KiB (6% of the 3.65 MiB default component).
+# (MD5 stays — OpenSSL 3.6 rejects no-md5 because several internal paths
+# still reference it, e.g. TLS 1.0/1.1 PRF and some PKCS primitives.)
 ifeq ($(size),min)
-SIZE_DISABLE := no-md5 no-ripemd no-blake2 no-sm2 no-sm3 no-sm4 \
+SIZE_DISABLE := no-blake2 no-sm2 no-sm3 no-sm4 \
                 no-camellia no-aria no-idea no-rc2 no-rc5 no-seed \
                 no-mdc2 no-whirlpool no-cast no-bf
 endif
@@ -111,6 +115,16 @@ LDFLAGS      := --target=$(TARGET) --sysroot=$(SYSROOT) \
         stage-openssl-config clean distclean check-wasi-sdk run host
 
 all: component
+
+# One-command setup for a fresh checkout: installs wasi-sdk into
+# .wasi-sdk/ (if missing), fetches the Mozilla CA bundle, builds the
+# component, and runs the full test suite.
+.PHONY: dev
+dev:
+	@test -x $(WASI_SDK)/bin/clang || bash scripts/install-wasi-sdk.sh
+	@test -f examples/host/fixtures/cacert.pem || bash scripts/fetch-mozilla-ca.sh
+	$(MAKE) component
+	$(MAKE) test
 
 check-wasi-sdk:
 	@test -x $(CLANG) || { \
@@ -205,7 +219,7 @@ run: host
 
 test: $(COMPONENT)
 	OPENSSL_WASM_COMPONENT=$(COMPONENT) \
-	cd examples/host && cargo test --release
+	cd examples/host && cargo test --release -- --test-threads=1
 
 # Static analysis pass over the glue code. Uses clang's analyzer (same
 # infrastructure used by scan-build). Runs in about a second. Does NOT

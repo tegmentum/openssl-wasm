@@ -22,10 +22,16 @@ static inline const EVP_MD *wit_digest_md(
     case 11: return EVP_sha3_512();
     case 12: return EVP_shake128();
     case 13: return EVP_shake256();
+#ifndef OPENSSL_NO_BLAKE2
     case 14: return EVP_blake2s256();
     case 15: return EVP_blake2b512();
+#endif
+#ifndef OPENSSL_NO_RMD160
     case 16: return EVP_ripemd160();
+#endif
+#ifndef OPENSSL_NO_SM3
     case 17: return EVP_sm3();
+#endif
     default: return NULL;
     }
 }

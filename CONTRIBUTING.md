@@ -10,11 +10,26 @@ make test                     # runs cargo test against the component
 make check                    # static analysis + wasm validation
 ```
 
+Or, fresh-checkout shortcut:
+
+```sh
+make dev                      # installs wasi-sdk + fetches CA bundle
+                              # + builds the component + runs tests
+```
+
 For editor support:
 
 ```sh
 make compile-commands         # writes compile_commands.json for clangd
 ```
+
+### A note on test parallelism
+
+`make test` runs with `--test-threads=1`. The TLS server tests in
+`examples/host/tests/tls_server.rs` bind ephemeral ports and accept
+connections from an OS thread inside the test process; running
+parallel tests caused port-binding flakes on some runners. Serial
+execution is fine — the full suite takes <30s.
 
 ## How the pipeline fits together
 

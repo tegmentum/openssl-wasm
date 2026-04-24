@@ -47,13 +47,19 @@ static const EVP_CIPHER *cipher_by_alg(
     case 25: return EVP_aes_256_ocb();
     case 26: return EVP_chacha20();
     case 27: return EVP_chacha20_poly1305();
+#ifndef OPENSSL_NO_CAMELLIA
     case 28: return EVP_camellia_128_cbc();
     case 29: return EVP_camellia_192_cbc();
     case 30: return EVP_camellia_256_cbc();
+#endif
+#ifndef OPENSSL_NO_ARIA
     case 31: return EVP_aria_128_gcm();
     case 32: return EVP_aria_192_gcm();
     case 33: return EVP_aria_256_gcm();
+#endif
+#ifndef OPENSSL_NO_SM4
     case 34: return EVP_sm4_cbc();
+#endif
     case 35: return NULL;  // SM4-GCM not in 3.x default EVP_* accessors
                            //  TODO: route via EVP_CIPHER_fetch("SM4-GCM")
     case 36: return EVP_des_ede3_cbc();
