@@ -206,10 +206,17 @@ static bool load_key_from_bytes(
 
     EVP_PKEY *pkey = NULL;
     const char *fmt_str = opts->encoding == ENC_PEM ? "PEM" : "DER";
-    const char *selection = want_private ? "PrivateKey" : "PublicKey";
-    (void)opts->format;
+    // Map format→structure so OSSL_DECODER picks the right parser.
+    // NULL means "any"; we only pass a specific structure when we know.
+    const char *structure = NULL;
+    if (want_private) {
+        if      (opts->format == FMT_PKCS8)       structure = "PrivateKeyInfo";
+        else if (opts->format == FMT_TRADITIONAL) structure = "type-specific";
+    } else {
+        if (opts->format == FMT_SPKI)             structure = "SubjectPublicKeyInfo";
+    }
     OSSL_DECODER_CTX *dctx = OSSL_DECODER_CTX_new_for_pkey(
-        &pkey, fmt_str, NULL, NULL,
+        &pkey, fmt_str, structure, NULL,
         want_private ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY,
         NULL, NULL);
     if (!dctx) { BIO_free(bio); err->tag = PE_INTERNAL; err->val.internal = 0; return false; }
@@ -220,7 +227,6 @@ static bool load_key_from_bytes(
     int ok = OSSL_DECODER_from_bio(dctx, bio);
     OSSL_DECODER_CTX_free(dctx);
     BIO_free(bio);
-    (void)selection;
     if (!ok || !pkey) {
         if (pkey) EVP_PKEY_free(pkey);
         err->tag = PE_BAD_ENCODING;
@@ -340,24 +346,26 @@ uint32_t exports_openssl_component_pkey_method_pkey_security_bits(
 
 bool exports_openssl_component_pkey_method_pkey_has_private(
         exports_openssl_component_pkey_borrow_pkey_t self) {
-    // Probe: try to extract a private key component. Accept any OK-ish response.
+    // Probe: try to extract a private key component. Accept any OK-ish
+    // response. Each failed probe pushes errors to the thread-local
+    // queue; we clear them before returning so subsequent error::drain
+    // calls don't see probe noise.
     EVP_PKEY *p = as_pkey(self);
     size_t n = 0;
-    // Only raw keys have EVP_PKEY_get_raw_private_key; for RSA/EC we rely on
-    // provider ability to fetch priv components. A simple heuristic:
-    if (EVP_PKEY_get_raw_private_key(p, NULL, &n) == 1) return true;
-    // Provider-based: try to get "priv" param.
-    BIGNUM *bn = NULL;
-    if (EVP_PKEY_get_bn_param(p, OSSL_PKEY_PARAM_PRIV_KEY, &bn) == 1) {
+    bool found = false;
+    if (EVP_PKEY_get_raw_private_key(p, NULL, &n) == 1) {
+        found = true;
+    } else {
+        BIGNUM *bn = NULL;
+        if (EVP_PKEY_get_bn_param(p, OSSL_PKEY_PARAM_PRIV_KEY, &bn) == 1) {
+            found = true;
+        } else if (EVP_PKEY_get_bn_param(p, OSSL_PKEY_PARAM_RSA_D, &bn) == 1) {
+            found = true;
+        }
         if (bn) BN_free(bn);
-        return true;
     }
-    // RSA needs "d".
-    if (EVP_PKEY_get_bn_param(p, OSSL_PKEY_PARAM_RSA_D, &bn) == 1) {
-        if (bn) BN_free(bn);
-        return true;
-    }
-    return false;
+    ERR_clear_error();
+    return found;
 }
 
 // Save / raw ---------------------------------------------------------------
