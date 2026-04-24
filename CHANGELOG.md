@@ -7,6 +7,8 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 ## [Unreleased]
 
 ### Added
+- `make dev` one-command setup (install wasi-sdk, fetch CA bundle,
+  build, test).
 - Experimental `make simd_aes=on` knob that replaces OpenSSL's T-table
   `AES_encrypt` / `AES_decrypt` with hand-written wasm SIMD via linker
   `--wrap`. AES-128/192/256 encrypt and decrypt, validated against
@@ -24,8 +26,9 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 - `make check` runs clang's static analyzer plus wasm validation.
 - `make simd=on` enables `-msimd128` (modest SHA-256 speedup, no AES
   speedup without hand-written intrinsics).
-- `make size=min` disables legacy ciphers/digests for a smaller
-  artifact.
+- `make size=min` disables legacy cipher/digest families (RIPEMD,
+  BLAKE2, SM*, Camellia, ARIA, IDEA, RC*, SEED, MDC2, Whirlpool, Cast,
+  Blowfish). Saves ~230 KiB (6% of the default 3.65 MiB artifact).
 - `examples/https-fetch/` and `examples/sign-service/` demo apps.
 - Criterion benchmark harness comparing component vs native OpenSSL.
 
