@@ -125,6 +125,78 @@ bundle (`/etc/ssl/cert.pem` on macOS,
 - **setjmp/longjmp:** wasi-sdk 32 lowers these to Wasm exception
   handling. Wasmtime ≥ 40 has this enabled by default.
 
+## Performance
+
+Measured on an Apple M-series, wasmtime 44, opt-level=2 (see
+`examples/host/benches/component_vs_native.rs`):
+
+| Operation                     | Component       | Native (libssl) | Ratio |
+|-------------------------------|----------------:|----------------:|------:|
+| SHA-256 (1 MiB)               |       256 MiB/s |     2,384 MiB/s |   ~9× |
+| AES-256-GCM seal (64 KiB)     |        52 MiB/s |     6,208 MiB/s | ~120× |
+| Ed25519 sign (1 KiB msg)      |          360 µs |          31.5 µs|  ~11× |
+
+Interpretation:
+- SHA-256 and signatures are within an order of magnitude of native.
+- AES-256-GCM is much slower because native uses AES-NI hardware
+  instructions; the component runs OpenSSL's portable C implementation
+  (`no-asm` at Configure). Enabling SIMD in wasm would help but is
+  future work.
+- If you need high AEAD throughput, consider batching or picking
+  ChaCha20-Poly1305 where both sides are pure software.
+
+Run `cargo bench --manifest-path examples/host/Cargo.toml` to reproduce.
+
+## Security notes
+
+### Constant-time guarantees
+
+Whatever constant-time properties OpenSSL's native implementation
+provides are preserved — the glue passes buffers through unmodified
+and doesn't perform data-dependent branching. Specifically:
+
+**Believed constant-time in OpenSSL (and preserved here):**
+- `digest.one-shot`, `digest.context.update/finish` — block-based,
+  not data-dependent.
+- `mac.*` — HMAC/CMAC/Poly1305/SipHash/GMAC all constant-time in
+  OpenSSL.
+- `cipher.*` for AES via constant-time software implementations when
+  AES-NI isn't available (OpenSSL's default on wasm).
+- `pkey.sign_*` / `pkey.verify_*` / `pkey.derive` for RSA/EC/Ed/X/DH.
+- `cipher.open` tag verification (uses `CRYPTO_memcmp`).
+
+**NOT constant-time — avoid with secret inputs:**
+- `bignum.to-dec` / `bignum.to-hex` — base conversion is data-dependent.
+- `bignum.from-dec` / `bignum.from-hex` — parsing branches on digits.
+- `error.describe` — string formatting.
+- `pkey.save-private` / `pkey.load-private` — ASN.1 encoding size
+  leaks key size bits.
+- Any RSA/EC operation on a public key that happens to be used for
+  signing (the library doesn't know your intent).
+
+### Threat model
+
+- The component runs in a wasmtime sandbox. Memory corruption in
+  OpenSSL cannot escape the sandbox.
+- The component assumes the host-provided `wasi:random` is a secure
+  CSPRNG. If the host is compromised or misconfigured (e.g., feeds
+  `/dev/zero` as entropy), all key material is compromised.
+- The component loads CA bundles via `wasi:filesystem`. A malicious
+  host can substitute the bundle, so TLS trust is only as strong as
+  the preopened directory.
+- Wasm exception handling is used for `setjmp`/`longjmp` in libssl
+  error paths. Wasmtime ≥ 40 handles this; older runtimes will trap.
+
+### What this component does NOT protect against
+
+- Timing side channels on the host CPU: the component runs on the host
+  CPU, so any data-dependent timing in OpenSSL flows through wasm
+  translation but is still observable.
+- The host can read the component's linear memory at any time. Do not
+  use this for key custody in adversarial-host scenarios.
+- The component does not implement side-channel hardening (e.g.
+  blinding) beyond what OpenSSL provides natively.
+
 ## Deliberate WIT-surface omissions
 
 The WIT surface exposes OpenSSL's curated high-level APIs. Low-level
