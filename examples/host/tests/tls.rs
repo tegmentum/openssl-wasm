@@ -88,13 +88,10 @@ async fn tls_verify_required_with_system_ca() {
     // Build store with default trust from preopened CA.
     let store = f.bindings.openssl_component_x509().store()
         .call_constructor(&mut f.store).await.unwrap();
-    let load_res = f.bindings.openssl_component_x509().store()
+    f.bindings.openssl_component_x509().store()
         .call_load_from_file(&mut f.store, store, &ca_path)
-        .await.unwrap();
-    if let Err(e) = load_res {
-        eprintln!("skipping: load_from_file failed (preopen pathing issue): {e:?}");
-        return;
-    }
+        .await.unwrap()
+        .expect("CA bundle should load from preopened /ca");
 
     let cfg = tls::ClientConfig {
         protocols: tls::ProtocolRange { min: tls::Protocol::Tls12, max: tls::Protocol::Tls13 },
