@@ -16,26 +16,28 @@
 //   Also inspired by the RustCrypto `aes` crate's wasm SIMD backend
 //   (Apache-2.0); no code copied.
 //
-// Phase B status: AES-128 encrypt is a correct SIMD implementation
-// using:
-//   - ShiftRows via a single i8x16.shuffle with fixed indices
-//   - MixColumns via xtime + column rotations + XOR
-//   - AddRoundKey via v128.xor
-//   - SubBytes via scalar S-box (store-lookup-load; future phase will
-//     replace this with a vpAES-style nibble-swizzle).
-// AES-192, AES-256, and the decrypt path still fall through to
-// __real_AES_encrypt / __real_AES_decrypt (OpenSSL's T-table code).
-// Phase C lifts those.
+// Phase C status: full AES-128/192/256 encrypt and decrypt in SIMD.
+// SubBytes / InvSubBytes still use scalar lookup; vpAES nibble-swizzle
+// lands in Phase E.
 //
-// AES_KEY invariants this file preserves:
-//   - `rd_key[]` is an array of uint32_t holding round keys in standard
-//     OpenSSL layout: columns stored as big-endian uint32_t words.
-//   - `rounds` is 10, 12, or 14 for AES-128/192/256.
-//   - Thread-safety: none needed — wasi is single-threaded.
+// Algorithm notes:
+//   - Decrypt uses the "Equivalent Inverse Cipher" (FIPS 197 §5.3.5),
+//     which is what OpenSSL's AES_set_decrypt_key produces. Middle
+//     round keys have already had InvMixColumns applied during key
+//     expansion, so this file doesn't re-apply it.
+//   - InvMixColumns computed as MixColumns(s) ⊕ 8·col_sum(s) ⊕
+//     4·alt_sum(s), exploiting the identity
+//       M_inv - M = 8·[1,1,1,1] + 4·[1,0,1,0]   (per column)
+//     See commit message for the derivation.
+//
+// AES_KEY invariants preserved:
+//   - `rd_key[]` holds 32-bit columns in big-endian (OpenSSL's native
+//     layout). On little-endian wasm this means bytes land reversed
+//     within each u32; `load_round_key` unreverses them.
+//   - `rounds` is 10/12/14 for AES-128/192/256.
 //
 // Constant-time: no data-dependent branches. The scalar S-box loop is
-// straight-line across 16 bytes. (Cache-timing is a theoretical worry
-// on general CPUs but is moot under wasmtime's sandbox model.)
+// straight-line across 16 bytes.
 
 #include <stdint.h>
 
@@ -45,10 +47,6 @@
 #  include <wasm_simd128.h>
 #endif
 
-// Declared by the linker via --wrap=AES_encrypt / --wrap=AES_decrypt.
-// When --wrap is absent these symbols aren't referenced and the
-// resulting __wrap_AES_encrypt / __wrap_AES_decrypt defined below
-// become dead code.
 extern void __real_AES_encrypt(const unsigned char *in,
                                unsigned char *out,
                                const AES_KEY *key);
@@ -58,7 +56,7 @@ extern void __real_AES_decrypt(const unsigned char *in,
 
 #ifdef __wasm_simd128__
 
-// FIPS 197 Figure 7. AES S-box for SubBytes. Public constant.
+// FIPS 197 Figure 7. AES S-box.
 static const uint8_t AES_SBOX[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
     0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -94,8 +92,42 @@ static const uint8_t AES_SBOX[256] = {
     0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 };
 
-// Apply SubBytes to each byte of a 16-byte state.
-// Scalar S-box lookup (future: vpAES nibble-swizzle trick).
+// FIPS 197 Figure 14. AES inverse S-box.
+static const uint8_t AES_INV_SBOX[256] = {
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38,
+    0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87,
+    0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d,
+    0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2,
+    0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16,
+    0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda,
+    0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a,
+    0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02,
+    0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea,
+    0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85,
+    0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89,
+    0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20,
+    0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31,
+    0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d,
+    0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0,
+    0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26,
+    0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
+};
+
 static inline v128_t aes_sub_bytes(v128_t state) {
     uint8_t b[16];
     wasm_v128_store(b, state);
@@ -103,55 +135,60 @@ static inline v128_t aes_sub_bytes(v128_t state) {
     return wasm_v128_load(b);
 }
 
-// ShiftRows for OpenSSL's column-major state layout.
-// State is a 4x4 matrix stored as 16 bytes with s[col*4 + row].
-// After ShiftRows:
-//   row 0: unchanged
-//   row 1: shift left (cyclic) by 1
-//   row 2: shift left by 2
-//   row 3: shift left by 3
-// So each output column c, row r comes from input column (c + r) mod 4.
-static inline v128_t aes_shift_rows(v128_t state) {
-    return wasm_i8x16_shuffle(state, state,
-        0,  5, 10, 15,   // output column 0
-        4,  9, 14,  3,   // output column 1
-        8, 13,  2,  7,   // output column 2
-       12,  1,  6, 11);  // output column 3
+static inline v128_t aes_inv_sub_bytes(v128_t state) {
+    uint8_t b[16];
+    wasm_v128_store(b, state);
+    for (int i = 0; i < 16; i++) b[i] = AES_INV_SBOX[b[i]];
+    return wasm_v128_load(b);
 }
 
-// xtime: GF(2^8) multiplication by 2, applied byte-wise.
-//   x·2 = (x << 1) XOR (x >> 7 ? 0x1b : 0)
-// Done SIMD-wide with a high-bit mask.
+// ShiftRows: row r shifts left by r (cyclic).
+static inline v128_t aes_shift_rows(v128_t state) {
+    return wasm_i8x16_shuffle(state, state,
+        0,  5, 10, 15,
+        4,  9, 14,  3,
+        8, 13,  2,  7,
+       12,  1,  6, 11);
+}
+
+// InvShiftRows: row r shifts right by r (cyclic). Inverse of aes_shift_rows.
+static inline v128_t aes_inv_shift_rows(v128_t state) {
+    return wasm_i8x16_shuffle(state, state,
+        0, 13, 10,  7,
+        4,  1, 14, 11,
+        8,  5,  2, 15,
+       12,  9,  6,  3);
+}
+
+// xtime: GF(2^8) multiplication by 2, byte-wise.
 static inline v128_t aes_xtime(v128_t x) {
     v128_t shl = wasm_i8x16_shl(x, 1);
-    // 0xff where x >= 0x80, else 0x00.
     v128_t high = wasm_u8x16_gt(x, wasm_u8x16_splat(0x7f));
     v128_t reduce = wasm_v128_and(high, wasm_u8x16_splat(0x1b));
     return wasm_v128_xor(shl, reduce);
 }
 
-// MixColumns: each column becomes [s0', s1', s2', s3'] = M · [s0,s1,s2,s3]
-// where M = [[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]] over GF(2^8).
-//
-// Let t = xtime(s) (so 3·s = t XOR s). For position 0 in a column:
-//   s0' = 2·s0 XOR 3·s1 XOR s2 XOR s3
-//       = t0 XOR (t1 XOR s1) XOR s2 XOR s3
-//       = t0 XOR t1 XOR s1 XOR s2 XOR s3
-//
-// Define rot_k(s) = left-rotate each 4-byte column by k. Then for any row r,
-// rot_k(s)[col*4 + r] = s[col*4 + ((r+k) mod 4)]. So:
-//   MixColumns(s) = t XOR rot_1(t) XOR rot_1(s) XOR rot_2(s) XOR rot_3(s)
+// Column rotations (left-rotate each 4-byte column by 1, 2, 3).
+static inline v128_t rot_col_1(v128_t s) {
+    return wasm_i8x16_shuffle(s, s,
+        1, 2, 3, 0,   5, 6, 7, 4,   9, 10, 11, 8,  13, 14, 15, 12);
+}
+static inline v128_t rot_col_2(v128_t s) {
+    return wasm_i8x16_shuffle(s, s,
+        2, 3, 0, 1,   6, 7, 4, 5,  10, 11,  8, 9,  14, 15, 12, 13);
+}
+static inline v128_t rot_col_3(v128_t s) {
+    return wasm_i8x16_shuffle(s, s,
+        3, 0, 1, 2,   7, 4, 5, 6,  11,  8,  9, 10, 15, 12, 13, 14);
+}
+
+// MixColumns. Derivation in the MixColumns section of the file header.
 static inline v128_t aes_mix_columns(v128_t s) {
     v128_t t = aes_xtime(s);
-
-    v128_t s_rot1 = wasm_i8x16_shuffle(s, s,
-        1, 2, 3, 0,   5, 6, 7, 4,   9, 10, 11, 8,  13, 14, 15, 12);
-    v128_t s_rot2 = wasm_i8x16_shuffle(s, s,
-        2, 3, 0, 1,   6, 7, 4, 5,  10, 11,  8, 9,  14, 15, 12, 13);
-    v128_t s_rot3 = wasm_i8x16_shuffle(s, s,
-        3, 0, 1, 2,   7, 4, 5, 6,  11,  8,  9, 10, 15, 12, 13, 14);
-    v128_t t_rot1 = wasm_i8x16_shuffle(t, t,
-        1, 2, 3, 0,   5, 6, 7, 4,   9, 10, 11, 8,  13, 14, 15, 12);
+    v128_t s_rot1 = rot_col_1(s);
+    v128_t s_rot2 = rot_col_2(s);
+    v128_t s_rot3 = rot_col_3(s);
+    v128_t t_rot1 = rot_col_1(t);
 
     v128_t out = wasm_v128_xor(t, t_rot1);
     out = wasm_v128_xor(out, s_rot1);
@@ -160,14 +197,41 @@ static inline v128_t aes_mix_columns(v128_t s) {
     return out;
 }
 
-// Load a round key from OpenSSL's AES_KEY into byte-plaintext order.
+// InvMixColumns via the identity
+//   M_inv(s) = M(s) ⊕ 8·col_sum(s) ⊕ 4·alt_sum(s)
+// where col_sum = sum over each column of s (broadcast into every byte
+// of that column), and alt_sum = s ⊕ rot_col_2(s).
 //
-// OpenSSL's `rd_key[]` holds 32-bit columns in big-endian. On
-// little-endian wasm, storing a big-endian uint32 means its bytes are
-// reversed in memory: key bytes (k0,k1,k2,k3) land in memory as
-// (k3,k2,k1,k0). Since our state v128 holds plaintext bytes in their
-// natural order, we need to reverse each 4-byte word of the round key
-// before XORing.
+// Derivation: M_inv - M is the matrix
+//   [[12,  8, 12,  8],
+//    [ 8, 12,  8, 12],
+//    [12,  8, 12,  8],
+//    [ 8, 12,  8, 12]]
+// Each row is 8·[1,1,1,1] + 4·[1,0,1,0] (or 4·[0,1,0,1]), which is
+// 8 times the column-sum plus 4 times alt_sum.
+static inline v128_t aes_inv_mix_columns(v128_t s) {
+    v128_t mc = aes_mix_columns(s);
+
+    v128_t s_rot1 = rot_col_1(s);
+    v128_t s_rot2 = rot_col_2(s);
+    v128_t s_rot3 = rot_col_3(s);
+
+    v128_t col_sum = wasm_v128_xor(s, s_rot1);
+    col_sum = wasm_v128_xor(col_sum, s_rot2);
+    col_sum = wasm_v128_xor(col_sum, s_rot3);
+
+    v128_t alt_sum = wasm_v128_xor(s, s_rot2);
+
+    // 4x = xtime(xtime(x)); 8x = xtime(xtime(xtime(x)))
+    v128_t four_alt = aes_xtime(aes_xtime(alt_sum));
+    v128_t eight_col = aes_xtime(aes_xtime(aes_xtime(col_sum)));
+
+    v128_t m_diff = wasm_v128_xor(eight_col, four_alt);
+    return wasm_v128_xor(mc, m_diff);
+}
+
+// Load a round key from OpenSSL's AES_KEY into byte-plaintext order.
+// See file header for the byte-swap rationale.
 static inline v128_t load_round_key(const uint8_t *rk) {
     v128_t raw = wasm_v128_load(rk);
     return wasm_i8x16_shuffle(raw, raw,
@@ -177,26 +241,52 @@ static inline v128_t load_round_key(const uint8_t *rk) {
         15, 14, 13, 12);
 }
 
-// AES-128 encrypt: 10 rounds.
-// Round keys are 11 consecutive 16-byte blocks in key->rd_key.
-static void aes128_encrypt_simd(const uint8_t in[16], uint8_t out[16],
-                                const AES_KEY *key) {
+// Encrypt. Handles AES-128 (10 rounds), AES-192 (12), AES-256 (14).
+static void aes_encrypt_simd(const uint8_t in[16], uint8_t out[16],
+                             const AES_KEY *key) {
     const uint8_t *rk = (const uint8_t *)key->rd_key;
+    const int rounds = key->rounds;
 
     v128_t state = wasm_v128_load(in);
     state = wasm_v128_xor(state, load_round_key(rk));
     rk += 16;
 
-    for (int round = 1; round < 10; round++) {
+    for (int round = 1; round < rounds; round++) {
         state = aes_sub_bytes(state);
         state = aes_shift_rows(state);
         state = aes_mix_columns(state);
         state = wasm_v128_xor(state, load_round_key(rk));
         rk += 16;
     }
-    // Final round: no MixColumns.
     state = aes_sub_bytes(state);
     state = aes_shift_rows(state);
+    state = wasm_v128_xor(state, load_round_key(rk));
+
+    wasm_v128_store(out, state);
+}
+
+// Decrypt using the Equivalent Inverse Cipher (FIPS 197 §5.3.5).
+// OpenSSL's AES_set_decrypt_key has already reversed the round-key
+// order and applied InvMixColumns to the middle round keys, so we
+// consume rd_key in order and simply XOR.
+static void aes_decrypt_simd(const uint8_t in[16], uint8_t out[16],
+                             const AES_KEY *key) {
+    const uint8_t *rk = (const uint8_t *)key->rd_key;
+    const int rounds = key->rounds;
+
+    v128_t state = wasm_v128_load(in);
+    state = wasm_v128_xor(state, load_round_key(rk));
+    rk += 16;
+
+    for (int round = 1; round < rounds; round++) {
+        state = aes_inv_sub_bytes(state);
+        state = aes_inv_shift_rows(state);
+        state = aes_inv_mix_columns(state);
+        state = wasm_v128_xor(state, load_round_key(rk));
+        rk += 16;
+    }
+    state = aes_inv_sub_bytes(state);
+    state = aes_inv_shift_rows(state);
     state = wasm_v128_xor(state, load_round_key(rk));
 
     wasm_v128_store(out, state);
@@ -208,18 +298,22 @@ void __wrap_AES_encrypt(const unsigned char *in,
                         unsigned char *out,
                         const AES_KEY *key) {
 #ifdef __wasm_simd128__
-    if (key->rounds == 10) {
-        aes128_encrypt_simd(in, out, key);
+    if (key->rounds == 10 || key->rounds == 12 || key->rounds == 14) {
+        aes_encrypt_simd(in, out, key);
         return;
     }
 #endif
-    // AES-192, AES-256, or non-SIMD build: fall through.
     __real_AES_encrypt(in, out, key);
 }
 
 void __wrap_AES_decrypt(const unsigned char *in,
                         unsigned char *out,
                         const AES_KEY *key) {
-    // Phase C will add the SIMD decrypt path.
+#ifdef __wasm_simd128__
+    if (key->rounds == 10 || key->rounds == 12 || key->rounds == 14) {
+        aes_decrypt_simd(in, out, key);
+        return;
+    }
+#endif
     __real_AES_decrypt(in, out, key);
 }
