@@ -426,12 +426,32 @@ void exports_openssl_component_tls_client_destructor(
 typedef struct server_listener_rep {
     SSL_CTX *ctx;
     int fd;
+    unsigned char *alpn_wire;   /* owned; freed with rep; may be NULL */
+    size_t alpn_wire_len;
 } server_listener_rep;
 
 typedef struct server_rep {
     SSL *ssl;
     int fd;
 } server_rep;
+
+// ALPN server-side selection callback. The wire-format server list is
+// passed as the callback arg (stashed in the listener rep).
+static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                          const unsigned char *in, unsigned int inlen, void *arg) {
+    (void)ssl;
+    const unsigned char *server_list = arg;
+    if (!server_list) return SSL_TLSEXT_ERR_NOACK;
+    // server_list is wire-format: length-prefixed entries, double-NUL terminated
+    // (we store the full wire-bytes plus a trailing 0 for termination).
+    size_t slen = 0;
+    while (server_list[slen]) slen += 1 + server_list[slen];
+    int rc = SSL_select_next_proto((unsigned char **)out, outlen,
+                                   server_list, (unsigned int)slen,
+                                   in, inlen);
+    return rc == OPENSSL_NPN_NEGOTIATED ? SSL_TLSEXT_ERR_OK
+                                         : SSL_TLSEXT_ERR_NOACK;
+}
 
 bool exports_openssl_component_tls_static_server_listener_bind(
         openssl_string_t *host, uint16_t port,
@@ -448,6 +468,13 @@ bool exports_openssl_component_tls_static_server_listener_bind(
              : cfg->verify == 1 ? (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)
              : SSL_VERIFY_PEER;
     SSL_CTX_set_verify(ctx, mode, NULL);
+
+    if (cfg->client_trust.is_some) {
+        X509_STORE *s = (X509_STORE *)
+            exports_openssl_component_x509_store_rep(cfg->client_trust.val);
+        X509_STORE_up_ref(s);
+        SSL_CTX_set_cert_store(ctx, s);
+    }
 
     if (cfg->cert_chain.len >= 1) {
         SSL_CTX_use_certificate(ctx,
@@ -474,6 +501,25 @@ bool exports_openssl_component_tls_static_server_listener_bind(
 
     server_listener_rep *r = xmalloc(sizeof(*r));
     r->ctx = ctx; r->fd = fd;
+    r->alpn_wire = NULL; r->alpn_wire_len = 0;
+
+    // Server-side ALPN: store the offered wire-format in the rep and
+    // wire it through a select callback (per-CTX arg).
+    if (cfg->alpn.is_some) {
+        size_t w = 0;
+        r->alpn_wire = alpn_wire(&cfg->alpn, &w);
+        if (r->alpn_wire) {
+            // We need a nul terminator for our callback's length scan.
+            unsigned char *nul = xmalloc(w + 1);
+            memcpy(nul, r->alpn_wire, w);
+            nul[w] = 0;
+            free(r->alpn_wire);
+            r->alpn_wire = nul;
+            r->alpn_wire_len = w;
+            SSL_CTX_set_alpn_select_cb(ctx, alpn_select_cb, r->alpn_wire);
+        }
+    }
+
     *ret = exports_openssl_component_tls_server_listener_new(
         (exports_openssl_component_tls_server_listener_t *)r);
     return true;
@@ -520,6 +566,7 @@ void exports_openssl_component_tls_static_server_listener_close(
         exports_openssl_component_tls_server_listener_rep(handle);
     if (r->fd >= 0) close(r->fd);
     if (r->ctx) SSL_CTX_free(r->ctx);
+    if (r->alpn_wire) { free(r->alpn_wire); r->alpn_wire = NULL; }
     r->fd = -1; r->ctx = NULL;
     exports_openssl_component_tls_server_listener_drop_own(handle);
 }
@@ -530,6 +577,7 @@ void exports_openssl_component_tls_server_listener_destructor(
     if (!r) return;
     if (r->fd >= 0) close(r->fd);
     if (r->ctx) SSL_CTX_free(r->ctx);
+    if (r->alpn_wire) free(r->alpn_wire);
     free(r);
 }
 
