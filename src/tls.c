@@ -271,6 +271,15 @@ bool exports_openssl_component_tls_static_client_connect(
         exports_openssl_component_tls_client_config_t *cfg,
         exports_openssl_component_tls_own_client_t *ret,
         exports_openssl_component_tls_tls_error_t *err) {
+    // DTLS 1.2 is in the WIT enum but not implemented in the component:
+    // we'd need BIO_s_datagram + UDP sockets + DTLS_client_method, all of
+    // which depend on wasi:sockets UDP which isn't smoke-tested here.
+    // Reject cleanly rather than silently fall back to TLS.
+    if (cfg->protocols.min == 2 || cfg->protocols.max == 2) {
+        err->tag = TE_PROTOCOL;
+        err->val.internal = 0;
+        return false;
+    }
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) { err->tag = TE_BAD_CONFIG; return false; }
     apply_protocols(ctx, &cfg->protocols);
@@ -508,11 +517,17 @@ static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *ou
                                          : SSL_TLSEXT_ERR_NOACK;
 }
 
+// See client_connect: DTLS is not implemented. Reject cleanly.
 bool exports_openssl_component_tls_static_server_listener_bind(
         openssl_string_t *host, uint16_t port,
         exports_openssl_component_tls_server_config_t *cfg,
         exports_openssl_component_tls_own_server_listener_t *ret,
         exports_openssl_component_tls_tls_error_t *err) {
+    if (cfg->protocols.min == 2 || cfg->protocols.max == 2) {
+        err->tag = TE_PROTOCOL;
+        err->val.internal = 0;
+        return false;
+    }
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) { err->tag = TE_BAD_CONFIG; return false; }
     apply_protocols(ctx, &cfg->protocols);

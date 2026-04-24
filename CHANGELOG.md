@@ -33,6 +33,9 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 - Criterion benchmark harness comparing component vs native OpenSSL.
 
 ### Known limitations
+- DTLS 1.2 is in the WIT enum but not implemented. The component
+  rejects DTLS-only protocol ranges with `TlsError::ProtocolVersion`
+  rather than silently falling back to TLS.
 - TLS server tests need `--test-threads=1` (implicit via criterion
   serial binding).
 - DH 2048-bit keygen is slow (>2 min per call on wasm); the test is
