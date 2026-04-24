@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         groups: None,
         enable_early_data: false,
         resume_session: None,
-        keylog: None,
+        keylog: false,
     };
     let client = f.bindings
         .openssl_component_tls()

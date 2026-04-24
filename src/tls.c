@@ -45,86 +45,67 @@ static int proto_version(exports_openssl_component_tls_protocol_t p) {
     }
 }
 
-// --- keylog sink ---------------------------------------------------------
+// --- keylog buffer (embedded in client/server/listener reps) -------------
 
-typedef struct keylog_rep {
+typedef struct keylog_buf {
     char **lines;
     size_t len, cap;
-} keylog_rep;
+} keylog_buf;
 
-// Per-CTX pointer to the active keylog_rep, stashed in SSL_CTX ex-data
-// so the callback (which only gets the SSL*) can find it. One slot is
-// registered process-wide at first use.
-static int keylog_ex_idx(void) {
+// Per-SSL pointer to a keylog_buf. Using SSL ex-data (not SSL_CTX)
+// because the listener's CTX is shared across all accepted connections;
+// each connection gets its own buffer.
+static int keylog_ssl_ex_idx(void) {
     static int idx = -1;
     if (idx == -1) {
-        idx = SSL_CTX_get_ex_new_index(0, (void *)"keylog", NULL, NULL, NULL);
+        idx = SSL_get_ex_new_index(0, (void *)"keylog", NULL, NULL, NULL);
     }
     return idx;
 }
 
-static void keylog_append(keylog_rep *r, const char *line) {
-    if (!r || !line) return;
-    if (r->len == r->cap) {
-        size_t nc = r->cap ? r->cap * 2 : 16;
-        r->lines = realloc(r->lines, nc * sizeof(char *));
-        if (!r->lines) return;
-        r->cap = nc;
+static void keylog_buf_init(keylog_buf *b) {
+    b->lines = NULL; b->len = 0; b->cap = 0;
+}
+
+static void keylog_buf_clear(keylog_buf *b) {
+    for (size_t i = 0; i < b->len; i++) free(b->lines[i]);
+    free(b->lines);
+    keylog_buf_init(b);
+}
+
+static void keylog_buf_append(keylog_buf *b, const char *line) {
+    if (!b || !line) return;
+    if (b->len == b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 16;
+        char **grown = realloc(b->lines, nc * sizeof(char *));
+        if (!grown) return;
+        b->lines = grown;
+        b->cap = nc;
     }
     size_t n = strlen(line);
     char *copy = xmalloc(n + 1);
     memcpy(copy, line, n);
     copy[n] = 0;
-    r->lines[r->len++] = copy;
+    b->lines[b->len++] = copy;
 }
 
 static void keylog_cb(const SSL *ssl, const char *line) {
-    SSL_CTX *ctx = SSL_get_SSL_CTX(ssl);
-    keylog_rep *r = SSL_CTX_get_ex_data(ctx, keylog_ex_idx());
-    keylog_append(r, line);
+    keylog_buf *b = SSL_get_ex_data(ssl, keylog_ssl_ex_idx());
+    keylog_buf_append(b, line);
 }
 
-// Install the keylog callback on a CTX if the caller passed a sink.
-static void attach_keylog(SSL_CTX *ctx,
-        const exports_openssl_component_tls_option_own_keylog_sink_t *opt) {
-    if (!opt->is_some) return;
-    keylog_rep *r = (keylog_rep *)
-        exports_openssl_component_tls_keylog_sink_rep(opt->val);
-    SSL_CTX_set_ex_data(ctx, keylog_ex_idx(), r);
-    SSL_CTX_set_keylog_callback(ctx, keylog_cb);
-}
-
-exports_openssl_component_tls_own_keylog_sink_t
-exports_openssl_component_tls_constructor_keylog_sink(void) {
-    keylog_rep *r = xmalloc(sizeof(*r));
-    r->lines = NULL; r->len = 0; r->cap = 0;
-    return exports_openssl_component_tls_keylog_sink_new(
-        (exports_openssl_component_tls_keylog_sink_t *)r);
-}
-
-void exports_openssl_component_tls_method_keylog_sink_drain(
-        exports_openssl_component_tls_borrow_keylog_sink_t self,
-        openssl_list_string_t *ret) {
-    keylog_rep *r = (keylog_rep *)self;
-    ret->ptr = xmalloc(r->len > 0 ? r->len * sizeof(openssl_string_t)
+// Drain buffer into WIT list<string>, leaving the buffer empty.
+static void keylog_buf_drain_to(keylog_buf *b, openssl_list_string_t *out) {
+    out->ptr = xmalloc(b->len > 0 ? b->len * sizeof(openssl_string_t)
                                    : sizeof(openssl_string_t));
-    ret->len = r->len;
-    for (size_t i = 0; i < r->len; i++) {
-        size_t n = strlen(r->lines[i]);
-        string_take(&ret->ptr[i], r->lines[i], n);
-        free(r->lines[i]);
+    out->len = b->len;
+    for (size_t i = 0; i < b->len; i++) {
+        size_t n = strlen(b->lines[i]);
+        string_take(&out->ptr[i], b->lines[i], n);
+        free(b->lines[i]);
     }
-    free(r->lines);
-    r->lines = NULL; r->len = 0; r->cap = 0;
-}
-
-void exports_openssl_component_tls_keylog_sink_destructor(
-        exports_openssl_component_tls_keylog_sink_t *rep) {
-    keylog_rep *r = (keylog_rep *)rep;
-    if (!r) return;
-    for (size_t i = 0; i < r->len; i++) free(r->lines[i]);
-    free(r->lines);
-    free(r);
+    free(b->lines);
+    keylog_buf_init(b);
 }
 
 // --- helpers -------------------------------------------------------------
@@ -282,6 +263,7 @@ typedef struct client_rep {
     SSL_CTX *ctx;
     SSL *ssl;
     int fd;
+    keylog_buf keylog;     /* non-empty iff cfg->keylog == true */
 } client_rep;
 
 bool exports_openssl_component_tls_static_client_connect(
@@ -298,9 +280,10 @@ bool exports_openssl_component_tls_static_client_connect(
     SSL_CTX_set_verify(ctx,
         cfg->verify == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, NULL);
     if (cfg->trust.is_some) {
-        SSL_CTX_set_cert_store(ctx,
-            (X509_STORE *)exports_openssl_component_x509_store_rep(cfg->trust.val));
-        /* We took ownership; X509_STORE_free at ctx teardown. */
+        X509_STORE *s = (X509_STORE *)
+            exports_openssl_component_x509_store_rep(cfg->trust.val);
+        X509_STORE_up_ref(s);  /* set_cert_store takes ownership without upref */
+        SSL_CTX_set_cert_store(ctx, s);
     }
     if (cfg->client_cert.is_some) {
         SSL_CTX_use_certificate(ctx,
@@ -310,7 +293,9 @@ bool exports_openssl_component_tls_static_client_connect(
         SSL_CTX_use_PrivateKey(ctx,
             (EVP_PKEY *)exports_openssl_component_pkey_pkey_rep(cfg->client_key.val));
     }
-    attach_keylog(ctx, &cfg->keylog);
+    if (cfg->keylog) {
+        SSL_CTX_set_keylog_callback(ctx, keylog_cb);
+    }
 
     size_t alpn_len = 0;
     unsigned char *alpn = alpn_wire(&cfg->alpn, &alpn_len);
@@ -337,6 +322,14 @@ bool exports_openssl_component_tls_static_client_connect(
         close(fd); SSL_CTX_free(ctx); free(hostnul);
         err->tag = TE_BAD_CONFIG; return false;
     }
+    // Install the keylog ex-data before SSL_connect so the callback has
+    // somewhere to write during handshake.
+    keylog_buf *pre_keylog = NULL;
+    if (cfg->keylog) {
+        pre_keylog = xmalloc(sizeof(*pre_keylog));
+        keylog_buf_init(pre_keylog);
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), pre_keylog);
+    }
     if (cfg->server_name.is_some) {
         char *s = xmalloc(cfg->server_name.val.len + 1);
         memcpy(s, cfg->server_name.val.ptr, cfg->server_name.val.len);
@@ -352,6 +345,7 @@ bool exports_openssl_component_tls_static_client_connect(
 
     if (SSL_connect(ssl) != 1) {
         int e = SSL_get_error(ssl, -1);
+        if (pre_keylog) { keylog_buf_clear(pre_keylog); free(pre_keylog); }
         SSL_free(ssl); close(fd); SSL_CTX_free(ctx); free(hostnul);
         err->tag = TE_HANDSHAKE;
         err->val.internal = (uint64_t)e;
@@ -361,6 +355,14 @@ bool exports_openssl_component_tls_static_client_connect(
     free(hostnul);
     client_rep *r = xmalloc(sizeof(*r));
     r->ctx = ctx; r->ssl = ssl; r->fd = fd;
+    if (pre_keylog) {
+        r->keylog = *pre_keylog;
+        free(pre_keylog);
+        // Point SSL ex-data at the final stable address inside the rep.
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), &r->keylog);
+    } else {
+        keylog_buf_init(&r->keylog);
+    }
     *ret = exports_openssl_component_tls_client_new(
         (exports_openssl_component_tls_client_t *)r);
     return true;
@@ -443,6 +445,13 @@ bool exports_openssl_component_tls_method_client_session_ticket(
     return true;
 }
 
+void exports_openssl_component_tls_method_client_drain_keylog(
+        exports_openssl_component_tls_borrow_client_t self,
+        openssl_list_string_t *ret) {
+    client_rep *r = (client_rep *)self;
+    keylog_buf_drain_to(&r->keylog, ret);
+}
+
 void exports_openssl_component_tls_static_client_close(
         exports_openssl_component_tls_own_client_t handle) {
     client_rep *r = (client_rep *)
@@ -461,6 +470,7 @@ void exports_openssl_component_tls_client_destructor(
     if (r->ssl) { SSL_shutdown(r->ssl); SSL_free(r->ssl); }
     if (r->fd >= 0) close(r->fd);
     if (r->ctx) SSL_CTX_free(r->ctx);
+    keylog_buf_clear(&r->keylog);
     free(r);
 }
 
@@ -471,11 +481,13 @@ typedef struct server_listener_rep {
     int fd;
     unsigned char *alpn_wire;   /* owned; freed with rep; may be NULL */
     size_t alpn_wire_len;
+    bool keylog_enabled;
 } server_listener_rep;
 
 typedef struct server_rep {
     SSL *ssl;
     int fd;
+    keylog_buf keylog;
 } server_rep;
 
 // ALPN server-side selection callback. The wire-format server list is
@@ -529,7 +541,9 @@ bool exports_openssl_component_tls_static_server_listener_bind(
     }
     SSL_CTX_use_PrivateKey(ctx,
         (EVP_PKEY *)exports_openssl_component_pkey_pkey_rep(cfg->key));
-    attach_keylog(ctx, &cfg->keylog);
+    if (cfg->keylog) {
+        SSL_CTX_set_keylog_callback(ctx, keylog_cb);
+    }
 
     char *hostnul = xmalloc(host->len + 1);
     memcpy(hostnul, host->ptr, host->len);
@@ -546,6 +560,7 @@ bool exports_openssl_component_tls_static_server_listener_bind(
     server_listener_rep *r = xmalloc(sizeof(*r));
     r->ctx = ctx; r->fd = fd;
     r->alpn_wire = NULL; r->alpn_wire_len = 0;
+    r->keylog_enabled = cfg->keylog;
 
     // Server-side ALPN: store the offered wire-format in the rep and
     // wire it through a select callback (per-CTX arg).
@@ -579,14 +594,32 @@ bool exports_openssl_component_tls_method_server_listener_accept(
     SSL *ssl = SSL_new(lr->ctx);
     if (!ssl) { close(cfd); err->tag = TE_INTERNAL; return false; }
     SSL_set_fd(ssl, cfd);
+
+    // If the listener had keylog enabled, attach a per-connection buffer
+    // to the SSL before the handshake runs.
+    keylog_buf *pre_keylog = NULL;
+    if (lr->keylog_enabled) {
+        pre_keylog = xmalloc(sizeof(*pre_keylog));
+        keylog_buf_init(pre_keylog);
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), pre_keylog);
+    }
+
     if (SSL_accept(ssl) != 1) {
         int e = SSL_get_error(ssl, -1);
+        if (pre_keylog) { keylog_buf_clear(pre_keylog); free(pre_keylog); }
         SSL_free(ssl); close(cfd);
         err->tag = TE_HANDSHAKE; err->val.internal = (uint64_t)e;
         return false;
     }
     server_rep *r = xmalloc(sizeof(*r));
     r->ssl = ssl; r->fd = cfd;
+    if (pre_keylog) {
+        r->keylog = *pre_keylog;
+        free(pre_keylog);
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), &r->keylog);
+    } else {
+        keylog_buf_init(&r->keylog);
+    }
     *ret = exports_openssl_component_tls_server_new(
         (exports_openssl_component_tls_server_t *)r);
     return true;
@@ -665,6 +698,13 @@ void exports_openssl_component_tls_method_server_peer(
     fill_peer_info(r->ssl, ret);
 }
 
+void exports_openssl_component_tls_method_server_drain_keylog(
+        exports_openssl_component_tls_borrow_server_t self,
+        openssl_list_string_t *ret) {
+    server_rep *r = (server_rep *)self;
+    keylog_buf_drain_to(&r->keylog, ret);
+}
+
 void exports_openssl_component_tls_static_server_close(
         exports_openssl_component_tls_own_server_t handle) {
     server_rep *r = (server_rep *)
@@ -681,5 +721,6 @@ void exports_openssl_component_tls_server_destructor(
     if (!r) return;
     if (r->ssl) { SSL_shutdown(r->ssl); SSL_free(r->ssl); }
     if (r->fd >= 0) close(r->fd);
+    keylog_buf_clear(&r->keylog);
     free(r);
 }

@@ -92,8 +92,8 @@ interface tls {
         enable-early-data: bool,
         /// Resumption ticket previously returned by `client.session-ticket`.
         resume-session: option<list<u8>>,
-        /// Optional SECRET_LOG — if set, NSS keylog lines are written here.
-        keylog: option<keylog-sink>,
+        /// Enable NSS-format SECRET_LOG capture. Drain via `client.drain-keylog`.
+        keylog: bool,
     }
 
     record server-config {
@@ -111,20 +111,14 @@ interface tls {
         ciphers: option<cipher-preferences>,
         groups: option<string>,
         session-tickets: session-ticket-policy,
-        keylog: option<keylog-sink>,
+        /// Enable NSS-format SECRET_LOG capture. Drain via `server.drain-keylog`.
+        keylog: bool,
     }
 
     record sni-binding {
         hostname: string,
         cert-chain: list<certificate>,
         key: pkey,
-    }
-
-    /// A sink for TLS keylog lines (one call per line, no trailing newline).
-    resource keylog-sink {
-        constructor();
-        /// Take currently-buffered lines and clear the buffer.
-        drain: func() -> list<string>;
     }
 
     record peer-info {
@@ -168,6 +162,10 @@ interface tls {
         /// Returns a serialized session ticket if the peer issued one.
         session-ticket: func() -> option<list<u8>>;
 
+        /// Take buffered NSS-format keylog lines. Empty unless
+        /// `keylog` was set in the config.
+        drain-keylog: func() -> list<string>;
+
         /// Send close_notify and close the underlying socket.
         close: static func(c: client);
     }
@@ -187,6 +185,9 @@ interface tls {
         write: func(data: list<u8>) -> result<u32, tls-error>;
         read: func(max-bytes: u32) -> result<list<u8>, tls-error>;
         peer: func() -> peer-info;
+        /// Take buffered NSS-format keylog lines. Empty unless
+        /// `keylog` was set in the listener's server-config.
+        drain-keylog: func() -> list<string>;
         close: static func(s: server);
     }
 }

@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
         server_name: Some(host.clone()),
         client_cert: None, client_key: None,
         alpn: None, ciphers: None, groups: None,
-        enable_early_data: false, resume_session: None, keylog: None,
+        enable_early_data: false, resume_session: None, keylog: false,
     };
     let client = bindings.openssl_component_tls().client()
         .call_connect(&mut store, &host, port, &cfg).await?

@@ -64,7 +64,7 @@ async fn tls_verify_none_connects() {
         server_name: Some("example.com".into()),
         client_cert: None, client_key: None,
         alpn: None, ciphers: None, groups: None,
-        enable_early_data: false, resume_session: None, keylog: None,
+        enable_early_data: false, resume_session: None, keylog: false,
     };
     let client = match f.bindings.openssl_component_tls().client()
         .call_connect(&mut f.store, "example.com", 443, &cfg).await.unwrap() {
@@ -109,7 +109,7 @@ async fn tls_verify_required_with_system_ca() {
         server_name: Some("example.com".into()),
         client_cert: None, client_key: None,
         alpn: None, ciphers: None, groups: None,
-        enable_early_data: false, resume_session: None, keylog: None,
+        enable_early_data: false, resume_session: None, keylog: false,
     };
     let client = match f.bindings.openssl_component_tls().client()
         .call_connect(&mut f.store, "example.com", 443, &cfg).await.unwrap() {

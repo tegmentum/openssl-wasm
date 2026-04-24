@@ -71,7 +71,7 @@ async fn server_accepts_and_echoes() {
         sni_hosts: vec![],
         alpn: None, ciphers: None, groups: None,
         session_tickets: tls::SessionTicketPolicy::Disabled,
-        keylog: None,
+        keylog: false,
     };
     let listener = f.bindings.openssl_component_tls().server_listener()
         .call_bind(&mut f.store, "127.0.0.1", 0, &cfg)
@@ -175,7 +175,7 @@ async fn mtls_required_with_valid_client_cert() {
         sni_hosts: vec![],
         alpn: None, ciphers: None, groups: None,
         session_tickets: tls::SessionTicketPolicy::Disabled,
-        keylog: None,
+        keylog: false,
     };
     let listener = f.bindings.openssl_component_tls().server_listener()
         .call_bind(&mut f.store, "127.0.0.1", 0, &cfg)
@@ -229,7 +229,7 @@ async fn alpn_negotiation_round_trip() {
         }),
         ciphers: None, groups: None,
         session_tickets: tls::SessionTicketPolicy::Disabled,
-        keylog: None,
+        keylog: false,
     };
     let listener = f.bindings.openssl_component_tls().server_listener()
         .call_bind(&mut f.store, "127.0.0.1", 0, &cfg).await.unwrap().unwrap();
@@ -267,15 +267,12 @@ async fn alpn_negotiation_round_trip() {
     assert_eq!(client_sel.as_deref(), Some(b"h2" as &[u8]));
 }
 
-/// Keylog sink: create a sink, pass to server config, verify after
-/// handshake that drain returns NSS-format lines.
+/// Server captures TLS 1.3 NSS-format keylog lines; host drains and verifies.
 #[tokio::test]
-async fn keylog_sink_captures_secrets() {
+async fn server_drain_keylog_captures_nss_secrets() {
     let mut f = Fixture::with_builder(networked_builder()).await.unwrap();
     let (cert, key) = build_server_cert(&mut f).await;
 
-    let sink = f.bindings.openssl_component_tls().keylog_sink()
-        .call_constructor(&mut f.store).await.unwrap();
     let cfg = tls::ServerConfig {
         protocols: tls::ProtocolRange { min: tls::Protocol::Tls13, max: tls::Protocol::Tls13 },
         verify: tls::VerifyMode::None,
@@ -285,63 +282,7 @@ async fn keylog_sink_captures_secrets() {
         sni_hosts: vec![],
         alpn: None, ciphers: None, groups: None,
         session_tickets: tls::SessionTicketPolicy::Disabled,
-        keylog: Some(sink),
-    };
-    // If keylog isn't wired through to OpenSSL's keylog callback inside
-    // the component, the drain will be empty — test accepts that but
-    // asserts the handshake still works.
-    let listener = f.bindings.openssl_component_tls().server_listener()
-        .call_bind(&mut f.store, "127.0.0.1", 0, &cfg).await.unwrap().unwrap();
-    let port = f.bindings.openssl_component_tls().server_listener()
-        .call_local_port(&mut f.store, listener).await.unwrap();
-
-    let h = thread::spawn(move || -> Result<(), String> {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-        let ctx = openssl::ssl::SslContext::builder(openssl::ssl::SslMethod::tls_client())
-            .map_err(|e| e.to_string())?.build();
-        let mut ssl = openssl::ssl::Ssl::new(&ctx).map_err(|e| e.to_string())?;
-        ssl.set_verify(openssl::ssl::SslVerifyMode::NONE);
-        ssl.set_hostname("localhost").map_err(|e| e.to_string())?;
-        let mut stream = openssl::ssl::SslStream::new(ssl, tcp).map_err(|e| e.to_string())?;
-        stream.connect().map_err(|e| e.to_string())?;
-        stream.write_all(b"x").map_err(|e| e.to_string())?;
-        Ok(())
-    });
-
-    let server = f.bindings.openssl_component_tls().server_listener()
-        .call_accept(&mut f.store, listener).await.unwrap().unwrap();
-    let _ = f.bindings.openssl_component_tls().server()
-        .call_read(&mut f.store, server, 8).await.unwrap().unwrap();
-    h.join().unwrap().expect("client failed");
-    // Sink ownership moved into the server config; drop the listener
-    // to release it, then the sink resource still lives — we can't
-    // access it from here since we gave it away. This test mostly
-    // verifies the handshake completes with keylog configured.
-    // See tls_keylog_captures_secrets below for the drain-and-check
-    // flow (client side keeps its own sink reference).
-}
-
-/// Component as server with a keylog sink: the component's own server
-/// captures keylog lines. Handshake driven by a native OpenSSL client
-/// on an OS thread.
-#[tokio::test]
-async fn server_keylog_captures_secrets_on_drain() {
-    let mut f = Fixture::with_builder(networked_builder()).await.unwrap();
-    let (cert, key) = build_server_cert(&mut f).await;
-
-    let sink = f.bindings.openssl_component_tls().keylog_sink()
-        .call_constructor(&mut f.store).await.unwrap();
-    let cfg = tls::ServerConfig {
-        protocols: tls::ProtocolRange { min: tls::Protocol::Tls13, max: tls::Protocol::Tls13 },
-        verify: tls::VerifyMode::None,
-        client_trust: None,
-        cert_chain: vec![cert],
-        key,
-        sni_hosts: vec![],
-        alpn: None, ciphers: None, groups: None,
-        session_tickets: tls::SessionTicketPolicy::Disabled,
-        keylog: Some(sink),
+        keylog: true,
     };
     let listener = f.bindings.openssl_component_tls().server_listener()
         .call_bind(&mut f.store, "127.0.0.1", 0, &cfg).await.unwrap().unwrap();
@@ -368,16 +309,18 @@ async fn server_keylog_captures_secrets_on_drain() {
         .call_read(&mut f.store, server, 8).await.unwrap().unwrap();
     h.join().unwrap().expect("client failed");
 
-    // `sink` was moved into the server config; ownership transferred.
-    // But the rep pointer stashed in SSL_CTX's ex-data should have
-    // accumulated keylog lines. We can't access the sink from here
-    // because wasmtime considers that handle gone. What this test
-    // proves is: no trap, no crash, no leak — plus the earlier
-    // keylog_sink_captures_secrets test covers the drain call shape.
-    //
-    // Drain-and-assert is exercised via the native client lib in
-    // openssl::ssl::Ssl::set_keylog_callback had we used it there.
-    // For a true end-to-end drain test we'd need a second handle type
-    // (borrow-of-sink) in the WIT — deferred.
-    let _ = (sink, server);
+    let lines = f.bindings.openssl_component_tls().server()
+        .call_drain_keylog(&mut f.store, server).await.unwrap();
+    assert!(!lines.is_empty(), "keylog must capture at least one line");
+    assert!(lines.iter().any(|l|
+        l.starts_with("SERVER_HANDSHAKE_TRAFFIC_SECRET ") ||
+        l.starts_with("CLIENT_HANDSHAKE_TRAFFIC_SECRET ") ||
+        l.starts_with("SERVER_TRAFFIC_SECRET_0 ") ||
+        l.starts_with("CLIENT_TRAFFIC_SECRET_0 ")),
+        "keylog missing expected NSS label: {:?}", lines);
+
+    // Second drain returns empty (buffer cleared).
+    let again = f.bindings.openssl_component_tls().server()
+        .call_drain_keylog(&mut f.store, server).await.unwrap();
+    assert!(again.is_empty(), "second drain must be empty");
 }
