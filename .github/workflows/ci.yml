@@ -76,3 +76,17 @@ jobs:
       - name: Reproducible build check (linux only, expensive)
         if: matrix.os == 'ubuntu-latest'
         run: make repro-check
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit@0.21.2
+      - name: Audit host harness
+        run: cargo audit --file examples/host/Cargo.lock
+      - name: Audit https-fetch example
+        run: cargo audit --file examples/https-fetch/Cargo.lock
+      - name: Audit sign-service example
+        run: cargo audit --file examples/sign-service/Cargo.lock
