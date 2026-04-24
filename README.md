@@ -140,12 +140,28 @@ Interpretation:
 - SHA-256 and signatures are within an order of magnitude of native.
 - AES-256-GCM is much slower because native uses AES-NI hardware
   instructions; the component runs OpenSSL's portable C implementation
-  (`no-asm` at Configure). Enabling SIMD in wasm would help but is
-  future work.
+  (`no-asm` at Configure).
 - If you need high AEAD throughput, consider batching or picking
   ChaCha20-Poly1305 where both sides are pure software.
 
 Run `cargo bench --manifest-path examples/host/Cargo.toml` to reproduce.
+
+### Wasm SIMD
+
+`make simd=on` turns on `-msimd128` during the OpenSSL build. Measured
+effect on this workload:
+
+| Operation                  | Baseline  | `simd=on` | Δ      |
+|----------------------------|----------:|----------:|-------:|
+| SHA-256 (1 MiB)            | 226 MiB/s | 242 MiB/s |   +7%  |
+| AES-256-GCM seal (64 KiB)  |  41 MiB/s |  41 MiB/s |   0%   |
+| Ed25519 sign               |    391 µs |    387 µs |  ~1%   |
+
+Conclusion: modest SHA-256 improvement from clang's auto-vectorizer,
+no material change on AES or elliptic curves. OpenSSL's portable C AES
+(`aes_core.c` T-table implementation) is written in a style the
+auto-vectorizer can't transform; closing that gap requires hand-written
+wasm SIMD intrinsics in a custom AES implementation — not wired up here.
 
 ## Security notes
 

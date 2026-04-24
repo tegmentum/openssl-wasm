@@ -45,6 +45,12 @@ SIZE_DISABLE := no-md5 no-ripemd no-blake2 no-sm2 no-sm3 no-sm4 \
                 no-mdc2 no-whirlpool no-cast no-bf
 endif
 
+# simd=on enables wasm simd128 codegen (OpenSSL's portable C auto-vectorized).
+# Default off because gains are modest and older runtimes reject simd128.
+ifeq ($(simd),on)
+SIMD_FLAG    := -msimd128
+endif
+
 # OpenSSL produces these static archives.
 OPENSSL_LIBS := $(OPENSSL_BUILD)/libssl.a $(OPENSSL_BUILD)/libcrypto.a
 
@@ -58,8 +64,24 @@ BINDINGS_OBJ := $(BINDINGS_DIR)/openssl_component_type.o
 GLUE_SRCS    := $(wildcard src/*.c)
 GLUE_OBJS    := $(patsubst src/%.c,$(BUILD_DIR)/obj/%.o,$(GLUE_SRCS))
 
+# Reproducible-build knobs:
+# - SOURCE_DATE_EPOCH controls anywhere OpenSSL or clang embeds a
+#   timestamp (it's honored by clang's __DATE__/__TIME__ and by
+#   OpenSSL's timestamp-in-module-metadata). Default to the HEAD
+#   commit time; override by setting SOURCE_DATE_EPOCH.
+# - -Wno-builtin-macro-redefined lets us override __DATE__/__TIME__
+#   deterministically.
+SOURCE_DATE_EPOCH ?= $(shell git -C $(ROOT) log -1 --format=%ct 2>/dev/null || echo 0)
+export SOURCE_DATE_EPOCH
+
+REPRO_FLAGS  := -Wno-builtin-macro-redefined \
+                -D__DATE__="\"redacted\"" -D__TIME__="\"redacted\"" \
+                -fdebug-prefix-map=$(ROOT)=. \
+                -fmacro-prefix-map=$(ROOT)=.
+
 CFLAGS       := --target=$(TARGET) --sysroot=$(SYSROOT) \
                 -O2 -fno-strict-aliasing -Wall -Wextra -Wno-unused-parameter \
+                $(SIMD_FLAG) $(REPRO_FLAGS) \
                 -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL \
                 -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID \
                 -I$(OPENSSL_SRC)/include -I$(OPENSSL_BUILD)/include \
@@ -98,6 +120,9 @@ $(OPENSSL_BUILD)/Makefile: check-wasi-sdk stage-openssl-config
 	mkdir -p $(OPENSSL_BUILD)
 	cd $(OPENSSL_BUILD) && \
 	  WASI_SDK=$(WASI_SDK) \
+	  OPENSSL_WASM_SIMD_FLAG="$(SIMD_FLAG)" \
+	  OPENSSL_WASM_REPRO_FLAGS="$(REPRO_FLAGS)" \
+	  SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
 	  perl $(OPENSSL_SRC)/Configure $(TARGET) \
 	    no-threads no-shared no-dso no-asm no-engine no-async \
 	    no-afalgeng no-ktls no-ui-console no-autoload-config \
@@ -189,6 +214,24 @@ check:
 	$(WASM_TOOLS) component wit $(COMPONENT) > /dev/null
 	@echo "check passed."
 
+# Verify a build is reproducible: build twice from scratch, compare.
+# Expensive (two OpenSSL builds); run in CI only.
+repro-check:
+	rm -rf build/openssl build/obj $(COMPONENT) $(CORE_MODULE) $(BINDINGS_DIR)
+	$(MAKE) component
+	cp $(COMPONENT) $(BUILD_DIR)/repro-a.wasm
+	rm -rf build/openssl build/obj $(COMPONENT) $(CORE_MODULE) $(BINDINGS_DIR)
+	$(MAKE) component
+	cp $(COMPONENT) $(BUILD_DIR)/repro-b.wasm
+	@if cmp -s $(BUILD_DIR)/repro-a.wasm $(BUILD_DIR)/repro-b.wasm; then \
+	  echo "reproducible: SHA-256 $$(shasum -a 256 $(BUILD_DIR)/repro-a.wasm | awk '{print $$1}')"; \
+	else \
+	  echo "NOT reproducible:"; \
+	  ls -la $(BUILD_DIR)/repro-a.wasm $(BUILD_DIR)/repro-b.wasm; \
+	  shasum -a 256 $(BUILD_DIR)/repro-a.wasm $(BUILD_DIR)/repro-b.wasm; \
+	  exit 1; \
+	fi
+
 # Size breakdown of the component. Human-readable section sizes.
 size: $(COMPONENT)
 	@echo "total: $$(wc -c < $(COMPONENT)) bytes"
@@ -204,6 +247,10 @@ lint:
 # Regenerate compile_commands.json for clangd. Uses current WASI_SDK.
 compile-commands:
 	bash scripts/gen-compile-commands.sh
+
+# Emit CycloneDX 1.5 SBOM for the built component.
+sbom: $(COMPONENT)
+	bash scripts/gen-sbom.sh
 
 # ----------------------------------------------------------------------------
 # Cleanup.
