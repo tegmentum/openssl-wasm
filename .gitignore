@@ -1,0 +1,25 @@
+# Build output
+/build/
+/.wasi-sdk/
+*.wasm
+*.o
+*.a
+*.d
+
+# Generated bindings
+/src/bindings/
+/src/stubs.c
+
+# Rust
+/examples/host/target/
+/examples/host/Cargo.lock
+
+# OpenSSL in-tree build artifacts (submodule)
+/third_party/openssl/configdata.pm
+/third_party/openssl/Makefile
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
