@@ -1,0 +1,14 @@
+# Workspace root so cargo-fuzz can find the fuzz crate. The example
+# crates (examples/host, examples/https-fetch, examples/sign-service)
+# are their own workspaces — they're excluded here so dependency
+# resolution stays independent.
+
+[workspace]
+members = ["fuzz"]
+resolver = "2"
+exclude = [
+    "examples/host",
+    "examples/https-fetch",
+    "examples/sign-service",
+    "third_party/openssl",
+]

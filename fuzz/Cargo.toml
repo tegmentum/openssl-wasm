@@ -1,0 +1,49 @@
+[package]
+name = "openssl-wasm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tokio = { version = "1", features = ["rt", "macros"] }
+openssl-wasm-host = { path = "../examples/host" }
+wasmtime = { version = "44", features = ["component-model", "component-model-async"] }
+
+[[bin]]
+name = "cert_parse"
+path = "fuzz_targets/cert_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "csr_parse"
+path = "fuzz_targets/csr_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "crl_parse"
+path = "fuzz_targets/crl_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pkey_load_private"
+path = "fuzz_targets/pkey_load_private.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cms_verify"
+path = "fuzz_targets/cms_verify.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1
+
+[workspace]
