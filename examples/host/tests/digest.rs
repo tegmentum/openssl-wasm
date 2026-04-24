@@ -31,7 +31,7 @@ digest_vector!(sha1_abc, Algorithm::Sha1, b"abc",
 digest_vector!(sha512_abc, Algorithm::Sha512, b"abc",
     "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
 
-digest_vector!(sha3_256_empty, Algorithm::Sha3256, b"",
+digest_vector!(sha3_256_empty, Algorithm::Sha3t256, b"",
     "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a");
 
 #[tokio::test]
