@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install wasi-sdk
+        run: |
+          bash scripts/install-wasi-sdk.sh
+          echo "WASI_SDK=$PWD/.wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Install wasm-tools and wit-bindgen
+        run: |
+          cargo install --locked wasm-tools@1.247.0
+          cargo install --locked wit-bindgen-cli@0.48.1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            examples/host/target/
+            build/openssl/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('examples/host/Cargo.toml', 'third_party/openssl/VERSION.dat') }}
+
+      - name: Build component
+        run: make component
+
+      - name: Run test suite
+        # TLS tests that require a CA bundle will auto-skip if not found;
+        # ubuntu-latest has /etc/ssl/certs/ca-certificates.crt.
+        run: make test
