@@ -12,10 +12,12 @@ interface tls {
     use pkey.{pkey};
     use x509.{certificate, store, verify-options};
 
+    /// See note in digest.wit: trailing digit-only segments (e.g.
+    /// `tls1-2`) fail wac's kebab-case check. Use single-word aliases.
     enum protocol {
-        tls1-2,
-        tls1-3,
-        dtls1-2,
+        tls12,
+        tls13,
+        dtls12,
     }
 
     record protocol-range {

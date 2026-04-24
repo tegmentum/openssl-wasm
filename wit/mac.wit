@@ -6,11 +6,13 @@ interface mac {
     use error.{code};
     use digest.{algorithm as hash};
 
+    /// Enum tags with trailing digit-only segments (e.g. `kmac-128`)
+    /// are rejected by wac's kebab-case check; use single-word form.
     enum algorithm {
         hmac,
         cmac,
-        kmac-128,
-        kmac-256,
+        kmac128,
+        kmac256,
         poly1305,
         siphash,
         gmac,
@@ -18,9 +20,9 @@ interface mac {
 
     /// Cipher family for CMAC / GMAC keying.
     enum block-cipher {
-        aes-128,
-        aes-192,
-        aes-256,
+        aes128,
+        aes192,
+        aes256,
     }
 
     variant mac-error {

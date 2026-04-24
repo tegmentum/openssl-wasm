@@ -5,6 +5,10 @@ package openssl:component@0.1.0;
 interface digest {
     use error.{code};
 
+    /// Algorithm identifiers use single-word kebab-case. The SHA-512/t
+    /// truncations and SHA-3 family use NIST's single-word notation
+    /// (e.g. `sha512t224` = SHA-512/224) because wac rejects enum tags
+    /// whose final segment is all digits (e.g. `sha512-224`).
     enum algorithm {
         md5,
         sha1,
@@ -12,16 +16,16 @@ interface digest {
         sha256,
         sha384,
         sha512,
-        sha512-224,
-        sha512-256,
-        sha3-224,
-        sha3-256,
-        sha3-384,
-        sha3-512,
+        sha512t224,
+        sha512t256,
+        sha3t224,
+        sha3t256,
+        sha3t384,
+        sha3t512,
         shake128,
         shake256,
-        blake2s-256,
-        blake2b-512,
+        blake2s256,
+        blake2b512,
         ripemd160,
         sm3,
     }
