@@ -304,7 +304,7 @@ bool exports_openssl_component_kdf_tls13_expand_label(
     o += params->label.len;
     info[o++] = (unsigned char)params->context.len;
     memcpy(info + o, params->context.ptr, params->context.len);
-    o += params->context.len;
+    /* Final offset o + context.len == info_len; not read further. */
 
     OSSL_PARAM p[] = {
         OSSL_PARAM_construct_int(OSSL_KDF_PARAM_MODE, &mode),

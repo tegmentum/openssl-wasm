@@ -81,7 +81,7 @@ static int build_mac_params(
         break;
     }
     case 2: // KMAC-128
-    case 3: // KMAC-256
+    case 3: { // KMAC-256
         if (p->tag != EXPORTS_OPENSSL_COMPONENT_MAC_PARAMS_KMAC) {
             err->tag = MAC_ERR_MISSING; return -1;
         }
@@ -91,20 +91,24 @@ static int build_mac_params(
                 p->val.kmac.customization.val.ptr,
                 p->val.kmac.customization.val.len);
         }
-        {
-            static size_t zero = 0;
-            size_t *psz = (size_t *)&p->val.kmac.output_len;
-            (void)zero; (void)psz;
-            /* OSSL_MAC_PARAM_SIZE is set via OSSL_PARAM_construct_size_t which
-             * needs a non-const pointer to a size_t. Emit into caller's buf. */
-        }
-        {
-            static _Thread_local size_t scratch_size;
-            scratch_size = p->val.kmac.output_len;
-            out[i++] = OSSL_PARAM_construct_size_t(
-                OSSL_MAC_PARAM_SIZE, &scratch_size);
-        }
+        // OSSL_PARAM_construct_size_t needs a non-const size_t pointer.
+        // EVP_MAC_init reads this value synchronously, so a stack-local
+        // here is safe even though the pointer nominally outlives this
+        // call — we're passed `out` by reference and the caller invokes
+        // EVP_MAC_init before returning. We scope `scratch_size` into
+        // the rest of the switch by caller reading `p->val.kmac.output_len`
+        // through a local size_t in the outer function. To keep the
+        // lifetime crystal-clear, require the caller to own that buffer.
+        //
+        // For simplicity we use a static buffer here. This is safe
+        // because (a) wasi is single-threaded, (b) EVP_MAC_init copies
+        // the value immediately into the MAC context before returning.
+        static size_t kmac_size_scratch;
+        kmac_size_scratch = p->val.kmac.output_len;
+        out[i++] = OSSL_PARAM_construct_size_t(
+            OSSL_MAC_PARAM_SIZE, &kmac_size_scratch);
         break;
+    }
     case 4: // Poly1305
     case 5: // SIPHASH
         /* No params needed. */
