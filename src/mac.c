@@ -221,7 +221,9 @@ exports_openssl_component_mac_constructor_context(
     mac_ctx_rep *r = xmalloc(sizeof(*r));
     exports_openssl_component_mac_mac_error_t ignored = {0};
     r->ctx = new_mac_ctx(alg, key, params, &ignored);
-    // If ctx is NULL, subsequent update/finish will fail with INTERNAL.
+    // If init failed, drop the residual queue so it doesn't leak into
+    // the caller's next error.drain-errors.
+    if (!r->ctx) ERR_clear_error();
     return exports_openssl_component_mac_context_new(r);
 }
 

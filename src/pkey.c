@@ -107,9 +107,10 @@ bool exports_openssl_component_pkey_static_pkey_generate(
         }
         if (params->val.rsa.public_exponent.is_some) {
             BIGNUM *e = BN_new();
-            BN_set_word(e, params->val.rsa.public_exponent.val);
-            if (EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, e) <= 0) {
-                BN_free(e);
+            if (!e ||
+                !BN_set_word(e, params->val.rsa.public_exponent.val) ||
+                EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, e) <= 0) {
+                if (e) BN_free(e);
                 err->tag = PE_BAD_KEY_SIZE; goto cleanup;
             }
         }

@@ -355,6 +355,7 @@ bool exports_openssl_component_x509_static_csr_parse(
         exports_openssl_component_x509_own_csr_t *ret,
         exports_openssl_component_x509_x509_error_t *err) {
     BIO *b = BIO_new_mem_buf(bytes->ptr, (int)bytes->len);
+    if (!b) { err->tag = XE_INTERNAL; err->val.internal = 0; return false; }
     X509_REQ *r = enc == 0
         ? PEM_read_bio_X509_REQ(b, NULL, NULL, NULL)
         : d2i_X509_REQ_bio(b, NULL);
@@ -461,6 +462,7 @@ bool exports_openssl_component_x509_static_crl_parse(
         exports_openssl_component_x509_own_crl_t *ret,
         exports_openssl_component_x509_x509_error_t *err) {
     BIO *b = BIO_new_mem_buf(bytes->ptr, (int)bytes->len);
+    if (!b) { err->tag = XE_INTERNAL; err->val.internal = 0; return false; }
     X509_CRL *c = enc == 0
         ? PEM_read_bio_X509_CRL(b, NULL, NULL, NULL)
         : d2i_X509_CRL_bio(b, NULL);
@@ -744,6 +746,7 @@ bool exports_openssl_component_x509_pkcs12_parse(
         exports_openssl_component_x509_pkcs12_contents_t *ret,
         exports_openssl_component_x509_x509_error_t *err) {
     BIO *b = BIO_new_mem_buf(bytes->ptr, (int)bytes->len);
+    if (!b) { err->tag = XE_INTERNAL; err->val.internal = 0; return false; }
     PKCS12 *p12 = d2i_PKCS12_bio(b, NULL);
     BIO_free(b);
     if (!p12) { err->tag = XE_PARSE; err->val.internal = ERR_peek_last_error(); return false; }
@@ -828,6 +831,7 @@ bool exports_openssl_component_x509_cms_verify(
         openssl_option_list_u8_t *ret,
         exports_openssl_component_x509_x509_error_t *err) {
     BIO *in = BIO_new_mem_buf(cms_bytes->ptr, (int)cms_bytes->len);
+    if (!in) { err->tag = XE_INTERNAL; err->val.internal = 0; return false; }
     CMS_ContentInfo *cms = enc == 0
         ? PEM_read_bio_CMS(in, NULL, NULL, NULL)
         : d2i_CMS_bio(in, NULL);

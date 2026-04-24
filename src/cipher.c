@@ -478,10 +478,11 @@ bool exports_openssl_component_cipher_static_decryptor_finish(
     ret->ptr = xmalloc(block > 0 ? block : 1);
     int l = 0;
     int ok = EVP_DecryptFinal_ex(r->ctx, ret->ptr, &l);
+    bool is_aead = alg_is_aead(r->alg);  /* snapshot before drop frees r */
     exports_openssl_component_cipher_decryptor_drop_own(handle);
     if (!ok) {
         free(ret->ptr);
-        err->tag = alg_is_aead(r->alg) ? CE_TAG_MISMATCH : CE_BAD_PAD;
+        err->tag = is_aead ? CE_TAG_MISMATCH : CE_BAD_PAD;
         return false;
     }
     ret->len = (size_t)l;

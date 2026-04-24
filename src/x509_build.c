@@ -193,22 +193,48 @@ bool exports_openssl_component_x509_build_and_sign(
     X509_set_version(c, X509_VERSION_3);
 
     // Serial number: parse from hex if supplied, otherwise random 128-bit.
+    // Fail loudly on parse / RNG failure rather than silently emitting a
+    // zero-serial certificate.
     ASN1_INTEGER *serial = ASN1_INTEGER_new();
+    if (!serial) {
+        X509_free(c);
+        err->tag = XE_INTERNAL; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
     if (input->serial_hex.is_some) {
         BIGNUM *bn = NULL;
         char *nul = xmalloc(input->serial_hex.val.len + 1);
         memcpy(nul, input->serial_hex.val.ptr, input->serial_hex.val.len);
         nul[input->serial_hex.val.len] = 0;
-        BN_hex2bn(&bn, nul);
+        int rc = BN_hex2bn(&bn, nul);
         free(nul);
-        if (bn) { BN_to_ASN1_INTEGER(bn, serial); BN_free(bn); }
+        if (rc == 0 || !bn || !BN_to_ASN1_INTEGER(bn, serial)) {
+            if (bn) BN_free(bn);
+            ASN1_INTEGER_free(serial);
+            X509_free(c);
+            ERR_clear_error();
+            err->tag = XE_BAD_NAME;
+            return false;
+        }
+        BN_free(bn);
     } else {
         unsigned char rnd[16];
-        if (RAND_bytes(rnd, sizeof(rnd)) == 1) {
-            rnd[0] &= 0x7f;  /* positive */
-            BIGNUM *bn = BN_bin2bn(rnd, sizeof(rnd), NULL);
-            if (bn) { BN_to_ASN1_INTEGER(bn, serial); BN_free(bn); }
+        if (RAND_bytes(rnd, sizeof(rnd)) != 1) {
+            ASN1_INTEGER_free(serial);
+            X509_free(c);
+            err->tag = XE_INTERNAL; err->val.internal = ERR_peek_last_error();
+            return false;
         }
+        rnd[0] &= 0x7f;  /* positive */
+        BIGNUM *bn = BN_bin2bn(rnd, sizeof(rnd), NULL);
+        if (!bn || !BN_to_ASN1_INTEGER(bn, serial)) {
+            if (bn) BN_free(bn);
+            ASN1_INTEGER_free(serial);
+            X509_free(c);
+            err->tag = XE_INTERNAL; err->val.internal = ERR_peek_last_error();
+            return false;
+        }
+        BN_free(bn);
     }
     X509_set_serialNumber(c, serial);
     ASN1_INTEGER_free(serial);
@@ -219,6 +245,7 @@ bool exports_openssl_component_x509_build_and_sign(
         if (subj) X509_NAME_free(subj);
         if (iss) X509_NAME_free(iss);
         X509_free(c);
+        ERR_clear_error();  /* drop build_name's OID/encoding residue */
         err->tag = XE_BAD_NAME; return false;
     }
     X509_set_subject_name(c, subj);
@@ -231,6 +258,7 @@ bool exports_openssl_component_x509_build_and_sign(
         if (nb) ASN1_TIME_free(nb);
         if (na) ASN1_TIME_free(na);
         X509_free(c);
+        ERR_clear_error();
         err->tag = XE_BAD_NAME; return false;
     }
     X509_set1_notBefore(c, nb);
@@ -265,11 +293,17 @@ bool exports_openssl_component_x509_build_and_sign(
     }
     if (input->basic_constraints.is_some) {
         BASIC_CONSTRAINTS *bc = BASIC_CONSTRAINTS_new();
+        if (!bc) { X509_free(c); err->tag = XE_INTERNAL; return false; }
         bc->ca = input->basic_constraints.val.is_ca ? 1 : 0;
         if (input->basic_constraints.val.path_len.is_some) {
             bc->pathlen = ASN1_INTEGER_new();
-            ASN1_INTEGER_set(bc->pathlen,
-                input->basic_constraints.val.path_len.val);
+            if (!bc->pathlen ||
+                !ASN1_INTEGER_set(bc->pathlen,
+                    input->basic_constraints.val.path_len.val)) {
+                BASIC_CONSTRAINTS_free(bc);
+                X509_free(c);
+                err->tag = XE_INTERNAL; return false;
+            }
         }
         if (!add_ext_d2i(c, NID_basic_constraints, bc)) {
             BASIC_CONSTRAINTS_free(bc);
