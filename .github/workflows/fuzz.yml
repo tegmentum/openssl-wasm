@@ -51,7 +51,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          # Unique per run so each campaign writes its grown corpus
+          # back; restore-keys lets us seed from the most recent run.
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
