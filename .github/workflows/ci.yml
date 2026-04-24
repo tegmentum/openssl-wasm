@@ -49,14 +49,30 @@ jobs:
             build/openssl/
           key: ${{ runner.os }}-cargo-${{ hashFiles('examples/host/Cargo.toml', 'third_party/openssl/VERSION.dat') }}
 
+      - name: Fetch Mozilla CA bundle
+        # Ensures the TLS verify-required test uses a known-good CA
+        # bundle regardless of runner defaults.
+        run: bash scripts/fetch-mozilla-ca.sh
+
       - name: Build component
         run: make component
 
       - name: Run test suite
-        # TLS verify-required test needs a CA bundle. Both ubuntu-latest
-        # (/etc/ssl/certs/ca-certificates.crt) and macos-latest
-        # (/etc/ssl/cert.pem) have one.
         run: make test
 
       - name: Static analysis
         run: make check
+
+      - name: SBOM
+        run: make sbom
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.os }}
+          path: build/openssl-component.sbom.json
+          if-no-files-found: error
+
+      - name: Reproducible build check (linux only, expensive)
+        if: matrix.os == 'ubuntu-latest'
+        run: make repro-check

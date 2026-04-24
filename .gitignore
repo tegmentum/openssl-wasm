@@ -4,6 +4,10 @@
 
 # Editor integration
 /compile_commands.json
+
+# Fetched test fixtures (Mozilla CA bundle; reproducible via
+# scripts/fetch-mozilla-ca.sh).
+/examples/host/fixtures/
 *.wasm
 *.o
 *.a

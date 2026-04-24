@@ -13,6 +13,9 @@ use exports::openssl::component::tls;
 use exports::openssl::component::x509;
 
 const CA_BUNDLE_CANDIDATES: &[&str] = &[
+    // Prefer our vendored Mozilla bundle (scripts/fetch-mozilla-ca.sh);
+    // falls back to system paths if fixture isn't present.
+    concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/cacert.pem"),
     "/etc/ssl/cert.pem",
     "/opt/homebrew/etc/ca-certificates/cert.pem",
     "/etc/pki/tls/certs/ca-bundle.crt",
