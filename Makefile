@@ -252,6 +252,15 @@ compile-commands:
 sbom: $(COMPONENT)
 	bash scripts/gen-sbom.sh
 
+# Run the component-vs-native benchmark suite.
+bench: $(COMPONENT)
+	OPENSSL_WASM_COMPONENT=$(COMPONENT) \
+	cd examples/host && cargo bench --bench component_vs_native
+
+# Generate rustdoc for the host harness. Opens in target/doc.
+docs:
+	cd examples/host && cargo doc --no-deps --open
+
 # ----------------------------------------------------------------------------
 # Cleanup.
 # ----------------------------------------------------------------------------

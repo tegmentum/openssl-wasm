@@ -52,6 +52,48 @@ typedef struct keylog_rep {
     size_t len, cap;
 } keylog_rep;
 
+// Per-CTX pointer to the active keylog_rep, stashed in SSL_CTX ex-data
+// so the callback (which only gets the SSL*) can find it. One slot is
+// registered process-wide at first use.
+static int keylog_ex_idx(void) {
+    static int idx = -1;
+    if (idx == -1) {
+        idx = SSL_CTX_get_ex_new_index(0, (void *)"keylog", NULL, NULL, NULL);
+    }
+    return idx;
+}
+
+static void keylog_append(keylog_rep *r, const char *line) {
+    if (!r || !line) return;
+    if (r->len == r->cap) {
+        size_t nc = r->cap ? r->cap * 2 : 16;
+        r->lines = realloc(r->lines, nc * sizeof(char *));
+        if (!r->lines) return;
+        r->cap = nc;
+    }
+    size_t n = strlen(line);
+    char *copy = xmalloc(n + 1);
+    memcpy(copy, line, n);
+    copy[n] = 0;
+    r->lines[r->len++] = copy;
+}
+
+static void keylog_cb(const SSL *ssl, const char *line) {
+    SSL_CTX *ctx = SSL_get_SSL_CTX(ssl);
+    keylog_rep *r = SSL_CTX_get_ex_data(ctx, keylog_ex_idx());
+    keylog_append(r, line);
+}
+
+// Install the keylog callback on a CTX if the caller passed a sink.
+static void attach_keylog(SSL_CTX *ctx,
+        const exports_openssl_component_tls_option_own_keylog_sink_t *opt) {
+    if (!opt->is_some) return;
+    keylog_rep *r = (keylog_rep *)
+        exports_openssl_component_tls_keylog_sink_rep(opt->val);
+    SSL_CTX_set_ex_data(ctx, keylog_ex_idx(), r);
+    SSL_CTX_set_keylog_callback(ctx, keylog_cb);
+}
+
 exports_openssl_component_tls_own_keylog_sink_t
 exports_openssl_component_tls_constructor_keylog_sink(void) {
     keylog_rep *r = xmalloc(sizeof(*r));
@@ -268,6 +310,7 @@ bool exports_openssl_component_tls_static_client_connect(
         SSL_CTX_use_PrivateKey(ctx,
             (EVP_PKEY *)exports_openssl_component_pkey_pkey_rep(cfg->client_key.val));
     }
+    attach_keylog(ctx, &cfg->keylog);
 
     size_t alpn_len = 0;
     unsigned char *alpn = alpn_wire(&cfg->alpn, &alpn_len);
@@ -486,6 +529,7 @@ bool exports_openssl_component_tls_static_server_listener_bind(
     }
     SSL_CTX_use_PrivateKey(ctx,
         (EVP_PKEY *)exports_openssl_component_pkey_pkey_rep(cfg->key));
+    attach_keylog(ctx, &cfg->keylog);
 
     char *hostnul = xmalloc(host->len + 1);
     memcpy(hostnul, host->ptr, host->len);

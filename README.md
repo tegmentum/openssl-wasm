@@ -1,5 +1,8 @@
 # openssl-wasm
 
+[![CI](https://github.com/zacharywhitley/openssl-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/zacharywhitley/openssl-wasm/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 OpenSSL 3.6.2 compiled as a WebAssembly Component (target `wasm32-wasip2`),
 callable from a `wasmtime` host via a curated WIT surface.
 

@@ -1,0 +1,40 @@
+# Changelog
+
+All notable changes to this project are documented here. Format loosely
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), with
+versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
+
+## [Unreleased]
+
+### Added
+- Initial component surface covering `error`, `random`, `bignum`,
+  `digest`, `mac`, `cipher`, `kdf`, `pkey`, `x509`, `tls`.
+- `scripts/install-wasi-sdk.sh` fetches wasi-sdk 32 into `.wasi-sdk/`.
+- `scripts/fetch-mozilla-ca.sh` vendors curl.se's Mozilla CA bundle.
+- `scripts/gen-sbom.sh` emits CycloneDX 1.5 SBOM covering OpenSSL +
+  wasi-sdk + clang versions.
+- `make repro-check` verifies bit-reproducible builds by building twice
+  from scratch and comparing.
+- `make check` runs clang's static analyzer plus wasm validation.
+- `make simd=on` enables `-msimd128` (modest SHA-256 speedup, no AES
+  speedup without hand-written intrinsics).
+- `make size=min` disables legacy ciphers/digests for a smaller
+  artifact.
+- `examples/https-fetch/` and `examples/sign-service/` demo apps.
+- Criterion benchmark harness comparing component vs native OpenSSL.
+
+### Known limitations
+- TLS server tests need `--test-threads=1` (implicit via criterion
+  serial binding).
+- DH 2048-bit keygen is slow (>2 min per call on wasm); the test is
+  `#[ignore]` by default.
+- Keylog callback isn't wired to OpenSSL's `SSL_CTX_set_keylog_callback`
+  yet; the resource exists but drain always returns empty.
+- Portable-C AES is ~120× slower than native AES-NI; closing the gap
+  needs hand-written wasm SIMD AES, not yet in-tree.
+
+## Versioning
+
+The WIT surface is pre-1.0. Breaking changes to `wit/*.wit` may land
+on any minor release until a stable `v1.0.0` tag. The exported package
+`openssl:component@0.1.0` will bump in lockstep.
