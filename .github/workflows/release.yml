@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # create releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install wasi-sdk
+        run: |
+          bash scripts/install-wasi-sdk.sh
+          echo "WASI_SDK=$PWD/.wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Install wasm-tools and wit-bindgen
+        run: |
+          cargo install --locked wasm-tools@1.247.0
+          cargo install --locked wit-bindgen-cli@0.48.1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build component
+        run: make component
+
+      - name: Sanity-check
+        run: make test
+
+      - name: Compute checksums
+        id: shasums
+        run: |
+          cd build
+          sha256sum openssl-component.wasm > openssl-component.wasm.sha256
+          echo "sha256=$(cut -d' ' -f1 openssl-component.wasm.sha256)" >> "$GITHUB_OUTPUT"
+          ls -la openssl-component.wasm openssl-component.wasm.sha256
+
+      - name: Extract WIT surface for the release
+        run: |
+          .wasi-sdk/bin/../../../../$(command -v wasm-tools) component wit \
+            build/openssl-component.wasm > build/openssl-component.wit || \
+          wasm-tools component wit build/openssl-component.wasm > build/openssl-component.wit
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: |
+            OpenSSL component for ${{ github.ref_name }}.
+
+            **SHA-256:** `${{ steps.shasums.outputs.sha256 }}`
+
+            Built against:
+            - OpenSSL 3.6.2 (third_party/openssl)
+            - wasi-sdk 32
+            - wasm32-wasip2 target
+
+            Attached:
+            - `openssl-component.wasm` — the component artifact
+            - `openssl-component.wasm.sha256` — checksum
+            - `openssl-component.wit` — exported interface definitions
+          files: |
+            build/openssl-component.wasm
+            build/openssl-component.wasm.sha256
+            build/openssl-component.wit

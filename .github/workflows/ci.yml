@@ -12,7 +12,11 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +36,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
+      - name: Cache cargo registry and openssl build
         uses: actions/cache@v4
         with:
           path: |
@@ -40,6 +44,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             examples/host/target/
+            examples/https-fetch/target/
+            examples/sign-service/target/
             build/openssl/
           key: ${{ runner.os }}-cargo-${{ hashFiles('examples/host/Cargo.toml', 'third_party/openssl/VERSION.dat') }}
 
@@ -47,6 +53,10 @@ jobs:
         run: make component
 
       - name: Run test suite
-        # TLS tests that require a CA bundle will auto-skip if not found;
-        # ubuntu-latest has /etc/ssl/certs/ca-certificates.crt.
+        # TLS verify-required test needs a CA bundle. Both ubuntu-latest
+        # (/etc/ssl/certs/ca-certificates.crt) and macos-latest
+        # (/etc/ssl/cert.pem) have one.
         run: make test
+
+      - name: Static analysis
+        run: make check
