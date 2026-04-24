@@ -37,6 +37,14 @@ COMPONENT    := $(BUILD_DIR)/openssl-component.wasm
 
 NPROC        := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
+# size=min drops legacy ciphers/digests. About 1 MB smaller artifact.
+# Callers lose MD5/RIPEMD/BLAKE2/SM*/Camellia/ARIA/IDEA/RC2/RC5/SEED/MDC2.
+ifeq ($(size),min)
+SIZE_DISABLE := no-md5 no-ripemd no-blake2 no-sm2 no-sm3 no-sm4 \
+                no-camellia no-aria no-idea no-rc2 no-rc5 no-seed \
+                no-mdc2 no-whirlpool no-cast no-bf
+endif
+
 # OpenSSL produces these static archives.
 OPENSSL_LIBS := $(OPENSSL_BUILD)/libssl.a $(OPENSSL_BUILD)/libcrypto.a
 
@@ -94,6 +102,7 @@ $(OPENSSL_BUILD)/Makefile: check-wasi-sdk stage-openssl-config
 	    no-threads no-shared no-dso no-asm no-engine no-async \
 	    no-afalgeng no-ktls no-ui-console no-autoload-config \
 	    no-module no-tests no-apps no-docs no-quic \
+	    $(SIZE_DISABLE) \
 	    --prefix=$(OPENSSL_BUILD)/install
 
 # ----------------------------------------------------------------------------
@@ -158,6 +167,43 @@ run: host
 test: $(COMPONENT)
 	OPENSSL_WASM_COMPONENT=$(COMPONENT) \
 	cd examples/host && cargo test --release
+
+# Static analysis pass over the glue code. Uses clang's analyzer (same
+# infrastructure used by scan-build). Runs in about a second. Does NOT
+# replace a real ASan run; that needs a native test harness with a
+# bindings shim, deferred.
+check:
+	@command -v clang >/dev/null || { echo "clang not found"; exit 1; }
+	@echo "static-analyzing src/*.c with clang analyzer..."
+	@for f in $(filter-out src/stubs.c,$(wildcard src/*.c)); do \
+	  clang --analyze \
+	    --target=$(TARGET) --sysroot=$(SYSROOT) \
+	    -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL \
+	    -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID \
+	    -I$(OPENSSL_SRC)/include -I$(OPENSSL_BUILD)/include \
+	    -Isrc -I$(BINDINGS_DIR) -Isrc/include \
+	    -Xanalyzer -analyzer-output=text \
+	    "$$f" || true; \
+	done
+	$(WASM_TOOLS) validate $(COMPONENT)
+	$(WASM_TOOLS) component wit $(COMPONENT) > /dev/null
+	@echo "check passed."
+
+# Size breakdown of the component. Human-readable section sizes.
+size: $(COMPONENT)
+	@echo "total: $$(wc -c < $(COMPONENT)) bytes"
+	@$(WASM_TOOLS) print $(COMPONENT) --skeleton 2>/dev/null | head -20 || true
+	@$(WASM_TOOLS) objdump $(COMPONENT) 2>/dev/null | head -20 || true
+
+# Formatter + clippy. Non-invasive (prints but doesn't auto-edit).
+lint:
+	@cd examples/host && cargo clippy --release --all-targets -- -D warnings
+	@cd examples/host && cargo fmt --check
+	@echo "lint passed."
+
+# Regenerate compile_commands.json for clangd. Uses current WASI_SDK.
+compile-commands:
+	bash scripts/gen-compile-commands.sh
 
 # ----------------------------------------------------------------------------
 # Cleanup.

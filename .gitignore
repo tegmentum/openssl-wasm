@@ -1,6 +1,9 @@
 # Build output
 /build/
 /.wasi-sdk/
+
+# Editor integration
+/compile_commands.json
 *.wasm
 *.o
 *.a
@@ -11,8 +14,8 @@
 /src/stubs.c
 
 # Rust
-/examples/host/target/
-/examples/host/Cargo.lock
+examples/**/target/
+examples/**/Cargo.lock
 
 # OpenSSL in-tree build artifacts (submodule)
 /third_party/openssl/configdata.pm
