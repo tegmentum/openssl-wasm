@@ -51,6 +51,19 @@ ifeq ($(simd),on)
 SIMD_FLAG    := -msimd128
 endif
 
+# simd_aes=on replaces OpenSSL's portable-C AES_encrypt / AES_decrypt with
+# hand-written wasm SIMD implementations (vpAES). Target: 5-8x speedup on
+# AES-GCM and CBC bulk paths.
+#
+# Uses --wrap so we don't touch the OpenSSL submodule. Phase A plumbing
+# only forwards to __real_*; Phase B+ replaces the implementations.
+# Implies simd=on.
+ifeq ($(simd_aes),on)
+SIMD_FLAG    := -msimd128
+SIMD_AES_WRAP := -Wl,--wrap=AES_encrypt -Wl,--wrap=AES_decrypt
+SIMD_AES_DEF := -DOPENSSL_WASM_SIMD_AES=1
+endif
+
 # OpenSSL produces these static archives.
 OPENSSL_LIBS := $(OPENSSL_BUILD)/libssl.a $(OPENSSL_BUILD)/libcrypto.a
 
@@ -81,7 +94,7 @@ REPRO_FLAGS  := -Wno-builtin-macro-redefined \
 
 CFLAGS       := --target=$(TARGET) --sysroot=$(SYSROOT) \
                 -O2 -fno-strict-aliasing -Wall -Wextra -Wno-unused-parameter \
-                $(SIMD_FLAG) $(REPRO_FLAGS) \
+                $(SIMD_FLAG) $(SIMD_AES_DEF) $(REPRO_FLAGS) \
                 -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL \
                 -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID \
                 -I$(OPENSSL_SRC)/include -I$(OPENSSL_BUILD)/include \
@@ -90,6 +103,7 @@ CFLAGS       := --target=$(TARGET) --sysroot=$(SYSROOT) \
 LDFLAGS      := --target=$(TARGET) --sysroot=$(SYSROOT) \
                 -mexec-model=reactor \
                 -Wl,--no-entry -Wl,--export-dynamic \
+                $(SIMD_AES_WRAP) \
                 -lwasi-emulated-mman -lwasi-emulated-signal \
                 -lwasi-emulated-process-clocks -lwasi-emulated-getpid
 
