@@ -7,6 +7,12 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 ## [Unreleased]
 
 ### Added
+- Experimental `make simd_aes=on` knob that replaces OpenSSL's T-table
+  `AES_encrypt` / `AES_decrypt` with hand-written wasm SIMD via linker
+  `--wrap`. AES-128/192/256 encrypt and decrypt, validated against
+  FIPS 197 and CAVP vectors. Currently ~40% slower than the T-table
+  baseline on AES-256-GCM (64 KiB); the vpAES nibble-swizzle S-box
+  work that would close the gap is not yet in-tree. Default is off.
 - Initial component surface covering `error`, `random`, `bignum`,
   `digest`, `mac`, `cipher`, `kdf`, `pkey`, `x509`, `tls`.
 - `scripts/install-wasi-sdk.sh` fetches wasi-sdk 32 into `.wasi-sdk/`.

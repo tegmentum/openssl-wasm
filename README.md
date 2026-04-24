@@ -161,10 +161,32 @@ effect on this workload:
 | Ed25519 sign               |    391 µs |    387 µs |  ~1%   |
 
 Conclusion: modest SHA-256 improvement from clang's auto-vectorizer,
-no material change on AES or elliptic curves. OpenSSL's portable C AES
-(`aes_core.c` T-table implementation) is written in a style the
-auto-vectorizer can't transform; closing that gap requires hand-written
-wasm SIMD intrinsics in a custom AES implementation — not wired up here.
+no material change on AES or elliptic curves.
+
+### Wasm SIMD AES (experimental)
+
+`make simd_aes=on` replaces OpenSSL's T-table `AES_encrypt` /
+`AES_decrypt` with hand-written wasm SIMD implementations via linker
+`--wrap`. Coverage: AES-128 / 192 / 256 encrypt and decrypt. Validated
+against NIST FIPS-197 and CAVP ECBGFSbox / ECBKeySbox vectors plus a
+1000-round differential against native libssl.
+
+**Current state: correctness-complete but slower than T-tables.**
+
+| Operation                  | T-table   | `simd_aes=on`| Δ        |
+|----------------------------|----------:|-------------:|---------:|
+| AES-256-GCM seal (64 KiB)  |  56 MiB/s |    34 MiB/s  |  -40%    |
+| AES-256-GCM seal (1 KiB)   |  1.9 MiB/s|    1.8 MiB/s |   -2%    |
+
+Why slower: the current S-box is a scalar 256-entry lookup (16 byte
+loads per block), surrounded by v128↔memory round-trips. T-tables
+avoid this by fusing SubBytes + ShiftRows + MixColumns into a single
+4-way-indexed 32-bit table load per byte. Closing the gap requires
+replacing the scalar S-box with a vpAES nibble-swizzle
+(Hamburg 2009) — ~12 SIMD ops per block instead of 16 scalar
+lookups. That work isn't in-tree yet.
+
+Default: **off**. Enable only if you're iterating on the algorithm.
 
 ## Security notes
 
