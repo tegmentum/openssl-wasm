@@ -1,0 +1,21 @@
+[package]
+name = "openssl-wasm-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "openssl_wasm_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openssl-wasm-host"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+wasmtime = { version = "44", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = "44"
+
+[workspace]
