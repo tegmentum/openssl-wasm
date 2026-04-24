@@ -6,6 +6,11 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 
 ## [Unreleased]
 
+### Fixed
+- `cipher.algorithm.sm4-gcm` previously returned `unsupported-algorithm`
+  because OpenSSL 3.x has no `EVP_sm4_gcm()` accessor. Now resolved
+  via cached `EVP_CIPHER_fetch("SM4-GCM")`.
+
 ### Added
 - `make dev` one-command setup (install wasi-sdk, fetch CA bundle,
   build, test).

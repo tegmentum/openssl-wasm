@@ -59,9 +59,21 @@ static const EVP_CIPHER *cipher_by_alg(
 #endif
 #ifndef OPENSSL_NO_SM4
     case 34: return EVP_sm4_cbc();
+    case 35: {
+        // SM4-GCM has no EVP_sm4_gcm() accessor in OpenSSL 3.x; fetch
+        // by name. The returned EVP_CIPHER must be freed, so we leak
+        // one refcount per call intentionally (amortized to a single
+        // static-lifetime entry). Pre-cache on first use.
+        static const EVP_CIPHER *sm4_gcm_cached = NULL;
+        if (!sm4_gcm_cached) {
+            sm4_gcm_cached = EVP_CIPHER_fetch(NULL, "SM4-GCM", NULL);
+        }
+        return sm4_gcm_cached;
+    }
+#else
+    case 34: return NULL;
+    case 35: return NULL;
 #endif
-    case 35: return NULL;  // SM4-GCM not in 3.x default EVP_* accessors
-                           //  TODO: route via EVP_CIPHER_fetch("SM4-GCM")
     case 36: return EVP_des_ede3_cbc();
     case 37: return EVP_rc4();
     default: return NULL;

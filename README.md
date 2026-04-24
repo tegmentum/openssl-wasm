@@ -15,8 +15,8 @@ Rust in the repo is the test driver in `examples/host`.
 ## Status
 
 - All 256 WIT exports are implemented against real OpenSSL.
-- 32 automated tests in `examples/host/tests/` pass, including
-  NIST/RFC known-answer vectors.
+- 102 automated tests in `examples/host/tests/` pass, including
+  NIST/RFC/FIPS 197 known-answer vectors.
 - TLS client verified live against `example.com:443` with real
   certificate-chain validation against the system CA bundle.
 
@@ -58,7 +58,7 @@ Rust in the repo is the test driver in `examples/host`.
 ├── examples/host/             # Rust wasmtime harness
 │   ├── src/lib.rs             # Fixture + bindgen
 │   ├── src/main.rs            # demo runner
-│   └── tests/*.rs             # 9 suites, ~32 tests total
+│   └── tests/*.rs             # 18 suites, 102 tests total
 ├── .github/workflows/ci.yml   # build + test on every push
 └── Makefile
 ```
