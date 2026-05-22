@@ -1,3 +1,7 @@
 [submodule "third_party/openssl"]
 	path = third_party/openssl
 	url = https://github.com/openssl/openssl.git
+	# The build stages config/50-wasm.conf into the submodule's
+	# Configurations/ dir; ignore that so status stays clean while
+	# still flagging a real change to the pinned commit.
+	ignore = untracked

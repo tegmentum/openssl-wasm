@@ -28,10 +28,6 @@
 # reproducibility.
 examples/**/target/
 
-# OpenSSL in-tree build artifacts (submodule)
-/third_party/openssl/configdata.pm
-/third_party/openssl/Makefile
-
 # Editor / OS
 .DS_Store
 .idea/
