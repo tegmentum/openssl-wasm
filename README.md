@@ -9,7 +9,7 @@ OpenSSL 3.6.2 compiled as a WebAssembly Component (target `wasm32-wasip2`),
 callable from a `wasmtime` host via a curated WIT surface.
 
 The component is **real OpenSSL** — `third_party/openssl` is the upstream
-source, built with `wasi-sdk` 32's clang into `libcrypto.a` + `libssl.a`
+source, built with `wasi-sdk` 33's clang into `libcrypto.a` + `libssl.a`
 and statically linked into a wasm component. The C glue in `src/` maps
 the WIT exports to OpenSSL's `EVP_*`, `X509_*`, `SSL_*`, etc. The only
 Rust in the repo is the test driver in `examples/host`.
@@ -44,7 +44,7 @@ Rust in the repo is the test driver in `examples/host`.
 .
 ├── config/50-wasm.conf        # OpenSSL Configure target for wasm32-wasip2
 ├── scripts/
-│   ├── install-wasi-sdk.sh    # downloads wasi-sdk 32 into .wasi-sdk/
+│   ├── install-wasi-sdk.sh    # downloads wasi-sdk 33 into .wasi-sdk/
 │   └── gen-stubs.sh           # regenerates src/stubs.c (should be empty now)
 ├── third_party/openssl/       # submodule, pinned to openssl-3.6.2
 ├── wit/                       # Component Model interface definitions
@@ -68,7 +68,7 @@ Rust in the repo is the test driver in `examples/host`.
 
 ## Prerequisites
 
-- **wasi-sdk 32.** `scripts/install-wasi-sdk.sh` drops it into `.wasi-sdk/`
+- **wasi-sdk 33.** `scripts/install-wasi-sdk.sh` drops it into `.wasi-sdk/`
   (gitignored). The Makefile picks that up automatically.
 - **wasm-tools** and **wit-bindgen** (both from cargo). Tested with
   wasm-tools 1.247 and wit-bindgen 0.48.
@@ -112,7 +112,7 @@ bundle (`/etc/ssl/cert.pem` on macOS,
 
 ## Design notes
 
-- **Target:** `wasm32-wasip2`. wasi-sdk 32's clang emits a Component
+- **Target:** `wasm32-wasip2`. wasi-sdk 33's clang emits a Component
   directly (magic bytes `0d 00 01 00`), so there's no `wasm-tools
   component new` step. We link with `-mexec-model=reactor` so the
   component exports only our WIT interfaces, no `wasi:cli/run`.
@@ -128,7 +128,7 @@ bundle (`/etc/ssl/cert.pem` on macOS,
 - **RNG:** OpenSSL's DRBG is seeded via `getentropy`, backed by
   `wasi:random`.
 - **Time:** certificate validity uses `wasi:clocks`.
-- **setjmp/longjmp:** wasi-sdk 32 lowers these to Wasm exception
+- **setjmp/longjmp:** wasi-sdk 33 lowers these to Wasm exception
   handling. Wasmtime ≥ 40 has this enabled by default.
 
 ## Performance

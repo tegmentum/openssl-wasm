@@ -4,7 +4,7 @@
 
 ```sh
 git submodule update --init --recursive
-scripts/install-wasi-sdk.sh   # downloads wasi-sdk 32 into .wasi-sdk/
+scripts/install-wasi-sdk.sh   # downloads wasi-sdk 33 into .wasi-sdk/
 make                          # builds build/openssl-component.wasm
 make test                     # runs cargo test against the component
 make check                    # static analysis + wasm validation

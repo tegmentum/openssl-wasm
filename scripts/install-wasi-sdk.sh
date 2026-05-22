@@ -3,12 +3,12 @@
 #
 # Usage:
 #     scripts/install-wasi-sdk.sh           # installs pinned version
-#     WASI_SDK_VERSION=32 scripts/install-wasi-sdk.sh
+#     WASI_SDK_VERSION=33 scripts/install-wasi-sdk.sh
 #     WASI_SDK_DEST=/opt/wasi-sdk scripts/install-wasi-sdk.sh
 
 set -euo pipefail
 
-VERSION="${WASI_SDK_VERSION:-32}"
+VERSION="${WASI_SDK_VERSION:-33}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${WASI_SDK_DEST:-$REPO_ROOT/.wasi-sdk}"
 

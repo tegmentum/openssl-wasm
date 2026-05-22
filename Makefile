@@ -13,12 +13,12 @@ SHELL        := bash
 .DEFAULT_GOAL := component
 
 # Default search order: $(ROOT)/.wasi-sdk (from scripts/install-wasi-sdk.sh),
-# then ~/wasi-sdk-32, then /opt/wasi-sdk. Override by setting WASI_SDK.
+# then ~/wasi-sdk-33, then /opt/wasi-sdk. Override by setting WASI_SDK.
 WASI_SDK     ?= $(firstword $(wildcard \
                   $(abspath .)/.wasi-sdk \
-                  $(HOME)/wasi-sdk-32 \
+                  $(HOME)/wasi-sdk-33 \
                   /opt/wasi-sdk) \
-                  $(HOME)/wasi-sdk-32)
+                  $(HOME)/wasi-sdk-33)
 WASM_TOOLS   ?= wasm-tools
 WIT_BINDGEN  ?= wit-bindgen
 
@@ -130,7 +130,7 @@ check-wasi-sdk:
 	@test -x $(CLANG) || { \
 	  echo "error: WASI_SDK not found at $(WASI_SDK)"; \
 	  echo "       run: scripts/install-wasi-sdk.sh"; \
-	  echo "       or set WASI_SDK=/path/to/wasi-sdk-32"; \
+	  echo "       or set WASI_SDK=/path/to/wasi-sdk-33"; \
 	  exit 1; }
 
 # ----------------------------------------------------------------------------
@@ -198,7 +198,7 @@ $(CORE_MODULE): $(GLUE_OBJS) $(BUILD_DIR)/obj/bindings.o $(BINDINGS_OBJ) $(OPENS
 # ----------------------------------------------------------------------------
 # 6. Finalize the component.
 #
-# wasi-sdk 32's wasm32-wasip2 target emits a Component directly (magic
+# wasi-sdk 33's wasm32-wasip2 target emits a Component directly (magic
 # 0d 00 01 00), so there is no core module to wrap — the link output IS
 # the component. We just copy and validate.
 # ----------------------------------------------------------------------------

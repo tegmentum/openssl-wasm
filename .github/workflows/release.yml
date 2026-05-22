@@ -63,7 +63,7 @@ jobs:
 
             Built against:
             - OpenSSL 3.6.2 (third_party/openssl)
-            - wasi-sdk 32
+            - wasi-sdk 33
             - wasm32-wasip2 target
 
             Attached:
