@@ -72,7 +72,7 @@ Rust in the repo is the test driver in `examples/host`.
   (gitignored). The Makefile picks that up automatically.
 - **wasm-tools** and **wit-bindgen** (both from cargo). Tested with
   wasm-tools 1.247 and wit-bindgen 0.48.
-- **wasmtime** runtime for the Rust host (44.x tested).
+- **wasmtime** runtime for the Rust host (45.x tested).
 - **cargo / rustc** stable.
 
 ## Build
@@ -89,7 +89,7 @@ Override wasi-sdk location: `WASI_SDK=/path/to/wasi-sdk make`.
 
 ## Using the component
 
-From Rust with wasmtime 44:
+From Rust with wasmtime 45:
 
 ```rust
 wasmtime::component::bindgen!({

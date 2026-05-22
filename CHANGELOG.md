@@ -8,7 +8,7 @@ versions tracked via git tags (`v0.1.0`, `v0.2.0`, …).
 
 ### Changed
 - Toolchain bump: build OpenSSL with wasi-sdk 33 (was 32) and run the
-  Rust host/fuzz crates against wasmtime 44.0.2 (was 44.0.0).
+  Rust host/fuzz crates against wasmtime 45.0.0 (was 44.0.0).
 
 ## [0.1.0] - 2026-04-24
 
