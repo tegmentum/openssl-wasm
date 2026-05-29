@@ -434,6 +434,12 @@ bool exports_openssl_component_tls_method_client_socket_readable(
     return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
+int32_t exports_openssl_component_tls_method_client_socket_fd(
+        exports_openssl_component_tls_borrow_client_t self) {
+    client_rep *r = (client_rep *)self;
+    return SSL_get_fd(r->ssl);
+}
+
 bool exports_openssl_component_tls_method_client_write_early(
         exports_openssl_component_tls_borrow_client_t self,
         openssl_list_u8_t *data, uint32_t *ret,
@@ -745,6 +751,12 @@ bool exports_openssl_component_tls_method_server_socket_readable(
     int n = poll(&pfd, 1, 1);
     if (n <= 0) return false;
     return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
+int32_t exports_openssl_component_tls_method_server_socket_fd(
+        exports_openssl_component_tls_borrow_server_t self) {
+    server_rep *r = (server_rep *)self;
+    return SSL_get_fd(r->ssl);
 }
 
 void exports_openssl_component_tls_method_server_peer(
