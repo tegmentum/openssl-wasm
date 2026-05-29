@@ -410,6 +410,12 @@ bool exports_openssl_component_tls_method_client_read(
     return true;
 }
 
+bool exports_openssl_component_tls_method_client_has_pending(
+        exports_openssl_component_tls_borrow_client_t self) {
+    client_rep *r = (client_rep *)self;
+    return SSL_has_pending(r->ssl) != 0;
+}
+
 bool exports_openssl_component_tls_method_client_write_early(
         exports_openssl_component_tls_borrow_client_t self,
         openssl_list_u8_t *data, uint32_t *ret,
@@ -704,6 +710,12 @@ bool exports_openssl_component_tls_method_server_read(
     }
     ret->len = (size_t)n;
     return true;
+}
+
+bool exports_openssl_component_tls_method_server_has_pending(
+        exports_openssl_component_tls_borrow_server_t self) {
+    server_rep *r = (server_rep *)self;
+    return SSL_has_pending(r->ssl) != 0;
 }
 
 void exports_openssl_component_tls_method_server_peer(
