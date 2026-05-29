@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -416,6 +417,23 @@ bool exports_openssl_component_tls_method_client_has_pending(
     return SSL_has_pending(r->ssl) != 0;
 }
 
+bool exports_openssl_component_tls_method_client_socket_readable(
+        exports_openssl_component_tls_borrow_client_t self) {
+    client_rep *r = (client_rep *)self;
+    int fd = SSL_get_fd(r->ssl);
+    if (fd < 0) return false;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    /* timeout=5ms. With timeout=0 the trailer record (e.g. the HTTP
+     * chunk-end sentinel arriving as a separate TLS record after the
+     * body) hasn't usually landed in the kernel TCP buffer by the time
+     * the drain loop checks — server packetizes it microseconds after
+     * the body. 5ms is enough wall-clock for the trailer to arrive
+     * without making keepalive-idle calls visibly slow. */
+    int n = poll(&pfd, 1, 1);
+    if (n <= 0) return false;
+    return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
 bool exports_openssl_component_tls_method_client_write_early(
         exports_openssl_component_tls_borrow_client_t self,
         openssl_list_u8_t *data, uint32_t *ret,
@@ -716,6 +734,17 @@ bool exports_openssl_component_tls_method_server_has_pending(
         exports_openssl_component_tls_borrow_server_t self) {
     server_rep *r = (server_rep *)self;
     return SSL_has_pending(r->ssl) != 0;
+}
+
+bool exports_openssl_component_tls_method_server_socket_readable(
+        exports_openssl_component_tls_borrow_server_t self) {
+    server_rep *r = (server_rep *)self;
+    int fd = SSL_get_fd(r->ssl);
+    if (fd < 0) return false;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    int n = poll(&pfd, 1, 1);
+    if (n <= 0) return false;
+    return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
 void exports_openssl_component_tls_method_server_peer(
