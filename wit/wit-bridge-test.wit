@@ -1,0 +1,23 @@
+package openssl:component@0.1.0;
+
+// Test-only interface for verifying the wit-bridge provider chain
+// end-to-end. The host calls sign-with-wit-bridge(uri, mdname, tbs)
+// and gets back the resulting signature (or a string error). The
+// implementation:
+//
+//   1. OSSL_PROVIDER_load("wit-bridge") -- the bridge registered by
+//      provider_wit.c at component init
+//   2. Calls keymgmt.load(uri) via the wit-bridge to materialize an
+//      EVP_PKEY whose private operations route back through the WIT
+//   3. EVP_DigestSign over `tbs` using `mdname` as the hash algorithm
+//   4. Returns the signature bytes
+//
+// Phase 6 will replace this with a proper SSLContext.set_pkcs11_key
+// pathway exposed through the existing tls / pkey interfaces.
+interface wit-bridge-test {
+  sign-with-wit-bridge: func(
+    uri: string,
+    mdname: string,
+    tbs: list<u8>,
+  ) -> result<list<u8>, string>;
+}

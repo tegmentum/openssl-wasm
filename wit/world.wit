@@ -29,6 +29,7 @@ world openssl {
     export pkey;
     export x509;
     export tls;
+    export wit-bridge-test;
 
     // ---------- imports (Layer-1 provider ABI) ------------------------
     // Satisfied at wac-compose time by a Layer-1 (or Layer-2 + Layer-3)
