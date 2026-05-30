@@ -2,13 +2,23 @@ package openssl:component@0.1.0;
 
 // World definition for the openssl component.
 //
-// Only exports are declared. WASI imports (wasi:io, wasi:sockets,
-// wasi:clocks, wasi:filesystem, wasi:random) are discovered from the
-// core module at `wasm-tools component new` time, so they do not need
-// to appear here. Host-side, `wasmtime_wasi::add_to_linker_async`
-// provides them.
+// The `export` block declares the openssl:component interfaces we
+// surface to consumers (Python's _ssl_cap, openssl-pyo3, etc.).
+//
+// The `import` block declares the openssl:provider-abi interfaces a
+// composed-in provider component satisfies. Phase 2 added these so
+// libcrypto can call out to a WIT-backed provider via the
+// src/provider_wit.c shim instead of dlopen-loading a .so. wac links
+// these imports to the provider component at compose time; the host
+// (wasmtime / jco) never sees them after composition.
+//
+// WASI imports (wasi:io, wasi:sockets, wasi:clocks, wasi:filesystem,
+// wasi:random) are discovered from the core module at `wasm-tools
+// component new` time, so they do not need to appear here. Host-side,
+// `wasmtime_wasi::add_to_linker_async` provides them.
 
 world openssl {
+    // ---------- exports (openssl-wasm's own surface) ------------------
     export error;
     export random;
     export bignum;
@@ -19,4 +29,16 @@ world openssl {
     export pkey;
     export x509;
     export tls;
+
+    // ---------- imports (Layer-1 provider ABI) ------------------------
+    // Satisfied at wac-compose time by a Layer-1 (or Layer-2 + Layer-3)
+    // provider component. Until a provider is composed in, the WIT
+    // import is unsatisfied -- composing openssl-wasm.wasm standalone
+    // is intentionally invalid; consumers always plug at least the
+    // null no-op provider.
+    import openssl:pkey/pkey@0.1.0;
+    import openssl:provider/provider@0.1.0;
+    import openssl:keymgmt/keymgmt@0.1.0;
+    import openssl:signature/signature@0.1.0;
+    import openssl:asym-cipher/asym-cipher@0.1.0;
 }

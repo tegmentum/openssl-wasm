@@ -1,0 +1,16 @@
+package openssl:noop-provider@0.1.0;
+
+// Trivial Layer-1 provider that satisfies openssl:provider-abi with
+// empty algorithm lists everywhere. Used as the default plug to keep
+// openssl-wasm composable when no real provider is wanted (so a stock
+// openssl-wasm + noop-provider composition behaves exactly like
+// pre-Phase-2 openssl-wasm did).
+//
+// Exports the same five interfaces the openssl-wasm world imports.
+world noop {
+  export openssl:pkey/pkey@0.1.0;
+  export openssl:provider/provider@0.1.0;
+  export openssl:keymgmt/keymgmt@0.1.0;
+  export openssl:signature/signature@0.1.0;
+  export openssl:asym-cipher/asym-cipher@0.1.0;
+}
