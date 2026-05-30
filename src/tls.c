@@ -1023,6 +1023,13 @@ bool exports_openssl_component_tls_method_mem_bio_client_selected_alpn_protocol(
     return true;
 }
 
+void exports_openssl_component_tls_method_mem_bio_client_peer(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        exports_openssl_component_tls_peer_info_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    fill_peer_info(r->ssl, ret);
+}
+
 bool exports_openssl_component_tls_method_mem_bio_client_shutdown(
         exports_openssl_component_tls_borrow_mem_bio_client_t self,
         exports_openssl_component_tls_tls_error_t *err) {
