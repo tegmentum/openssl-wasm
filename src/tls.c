@@ -484,6 +484,38 @@ bool exports_openssl_component_tls_method_client_session_ticket(
     return true;
 }
 
+/* Fill `out` with the peer chain serialised to DER (leaf first, then
+ * any intermediates the peer sent). Empty on no handshake / no peer.
+ * Shared by the connected and mem-bio clients. */
+static void fill_peer_chain_der(SSL *ssl,
+        openssl_list_list_u8_t *out) {
+    STACK_OF(X509) *chain = ssl ? SSL_get_peer_cert_chain(ssl) : NULL;
+    int n = chain ? sk_X509_num(chain) : 0;
+    if (n <= 0) { out->ptr = NULL; out->len = 0; return; }
+    out->ptr = xmalloc((size_t)n * sizeof(openssl_list_u8_t));
+    size_t written = 0;
+    for (int i = 0; i < n; i++) {
+        X509 *c = sk_X509_value(chain, i);
+        unsigned char *buf = NULL;
+        int len = i2d_X509(c, &buf);
+        if (len <= 0) { if (buf) OPENSSL_free(buf); continue; }
+        uint8_t *dup = xmalloc((size_t)len);
+        memcpy(dup, buf, (size_t)len);
+        OPENSSL_free(buf);
+        out->ptr[written].ptr = dup;
+        out->ptr[written].len = (size_t)len;
+        written++;
+    }
+    out->len = written;
+}
+
+void exports_openssl_component_tls_method_client_peer_chain_der(
+        exports_openssl_component_tls_borrow_client_t self,
+        openssl_list_list_u8_t *ret) {
+    client_rep *r = (client_rep *)self;
+    fill_peer_chain_der(r->ssl, ret);
+}
+
 void exports_openssl_component_tls_method_client_drain_keylog(
         exports_openssl_component_tls_borrow_client_t self,
         openssl_list_string_t *ret) {
@@ -1028,6 +1060,13 @@ void exports_openssl_component_tls_method_mem_bio_client_peer(
         exports_openssl_component_tls_peer_info_t *ret) {
     mem_bio_client_rep *r = (mem_bio_client_rep *)self;
     fill_peer_info(r->ssl, ret);
+}
+
+void exports_openssl_component_tls_method_mem_bio_client_peer_chain_der(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_list_list_u8_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    fill_peer_chain_der(r->ssl, ret);
 }
 
 bool exports_openssl_component_tls_method_mem_bio_client_shutdown(
