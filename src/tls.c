@@ -941,6 +941,15 @@ bool exports_openssl_component_tls_method_mem_bio_client_do_handshake(
     if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
         err->tag = TE_WOULD_BLOCK; err->val.internal = (uint64_t)e; return false;
     }
+    // Surface the OpenSSL error queue so callers see the real cause
+    // rather than the generic TE_HANDSHAKE marker.
+    unsigned long oe;
+    char buf[256];
+    while ((oe = ERR_get_error()) != 0) {
+        ERR_error_string_n(oe, buf, sizeof(buf));
+        fprintf(stderr, "[openssl-wasm] mem-bio do_handshake: %s\n", buf);
+    }
+    fflush(stderr);
     err->tag = TE_HANDSHAKE; err->val.internal = (uint64_t)e;
     return false;
 }
