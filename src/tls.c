@@ -792,3 +792,269 @@ void exports_openssl_component_tls_server_destructor(
     keylog_buf_clear(&r->keylog);
     free(r);
 }
+
+// --- mem-bio-client ------------------------------------------------------
+// Memory-BIO TLS client. The SSL object is wired to two BIO_s_mem()
+// instances: `in_bio` is OpenSSL's read-side (caller pumps ciphertext
+// FROM the network into it via bio-write), and `out_bio` is the
+// write-side (caller drains ciphertext to send TO the network via
+// bio-read). The component never touches a socket — anyio/httpx own
+// the transport and the event loop.
+
+typedef struct mem_bio_client_rep {
+    SSL_CTX *ctx;
+    SSL *ssl;
+    BIO *in_bio;   /* SSL reads here (we write incoming ciphertext into it) */
+    BIO *out_bio;  /* SSL writes here (we read outgoing ciphertext from it) */
+    int handshake_done;
+    keylog_buf keylog;     /* non-empty iff cfg->keylog == true */
+} mem_bio_client_rep;
+
+bool exports_openssl_component_tls_static_mem_bio_client_new(
+        exports_openssl_component_tls_client_config_t *cfg,
+        exports_openssl_component_tls_own_mem_bio_client_t *ret,
+        exports_openssl_component_tls_tls_error_t *err) {
+    if (cfg->protocols.min == 2 || cfg->protocols.max == 2) {
+        err->tag = TE_PROTOCOL; err->val.internal = 0; return false;
+    }
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { err->tag = TE_BAD_CONFIG; return false; }
+    apply_protocols(ctx, &cfg->protocols);
+    apply_ciphers(ctx, &cfg->ciphers);
+    apply_groups(ctx, &cfg->groups);
+    SSL_CTX_set_verify(ctx,
+        cfg->verify == 0 ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, NULL);
+    if (cfg->trust.is_some) {
+        X509_STORE *s = (X509_STORE *)
+            exports_openssl_component_x509_store_rep(cfg->trust.val);
+        X509_STORE_up_ref(s);
+        SSL_CTX_set_cert_store(ctx, s);
+    }
+    if (cfg->client_cert.is_some) {
+        SSL_CTX_use_certificate(ctx,
+            (X509 *)exports_openssl_component_x509_certificate_rep(cfg->client_cert.val));
+    }
+    if (cfg->client_key.is_some) {
+        SSL_CTX_use_PrivateKey(ctx,
+            (EVP_PKEY *)exports_openssl_component_pkey_pkey_rep(cfg->client_key.val));
+    }
+    if (cfg->keylog) {
+        SSL_CTX_set_keylog_callback(ctx, keylog_cb);
+    }
+    size_t alpn_len = 0;
+    unsigned char *alpn = alpn_wire(&cfg->alpn, &alpn_len);
+    if (alpn) {
+        SSL_CTX_set_alpn_protos(ctx, alpn, (unsigned int)alpn_len);
+        free(alpn);
+    }
+
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); err->tag = TE_BAD_CONFIG; return false; }
+
+    keylog_buf *pre_keylog = NULL;
+    if (cfg->keylog) {
+        pre_keylog = xmalloc(sizeof(*pre_keylog));
+        keylog_buf_init(pre_keylog);
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), pre_keylog);
+    }
+    if (cfg->server_name.is_some) {
+        char *s = xmalloc(cfg->server_name.val.len + 1);
+        memcpy(s, cfg->server_name.val.ptr, cfg->server_name.val.len);
+        s[cfg->server_name.val.len] = 0;
+        SSL_set_tlsext_host_name(ssl, s);
+        SSL_set1_host(ssl, s);
+        free(s);
+    }
+
+    BIO *in_bio = BIO_new(BIO_s_mem());
+    BIO *out_bio = BIO_new(BIO_s_mem());
+    if (!in_bio || !out_bio) {
+        if (in_bio) BIO_free(in_bio);
+        if (out_bio) BIO_free(out_bio);
+        if (pre_keylog) { keylog_buf_clear(pre_keylog); free(pre_keylog); }
+        SSL_free(ssl); SSL_CTX_free(ctx);
+        err->tag = TE_BAD_CONFIG; return false;
+    }
+    SSL_set_bio(ssl, in_bio, out_bio);
+    SSL_set_connect_state(ssl);
+
+    mem_bio_client_rep *r = xmalloc(sizeof(*r));
+    r->ctx = ctx;
+    r->ssl = ssl;
+    r->in_bio = in_bio;
+    r->out_bio = out_bio;
+    r->handshake_done = 0;
+    if (pre_keylog) {
+        r->keylog = *pre_keylog;
+        free(pre_keylog);
+        SSL_set_ex_data(ssl, keylog_ssl_ex_idx(), &r->keylog);
+    } else {
+        keylog_buf_init(&r->keylog);
+    }
+    *ret = exports_openssl_component_tls_mem_bio_client_new(
+        (exports_openssl_component_tls_mem_bio_client_t *)r);
+    return true;
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_do_handshake(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        exports_openssl_component_tls_tls_error_t *err) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    int rc = SSL_do_handshake(r->ssl);
+    if (rc == 1) {
+        r->handshake_done = 1;
+        return true;
+    }
+    int e = SSL_get_error(r->ssl, rc);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        err->tag = TE_WOULD_BLOCK; err->val.internal = (uint64_t)e; return false;
+    }
+    err->tag = TE_HANDSHAKE; err->val.internal = (uint64_t)e;
+    return false;
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_handshake_done(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    return r->handshake_done != 0;
+}
+
+uint32_t exports_openssl_component_tls_method_mem_bio_client_bio_write(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_list_u8_t *data) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    if (!data->len) return 0;
+    int n = BIO_write(r->in_bio, data->ptr, (int)data->len);
+    return n < 0 ? 0 : (uint32_t)n;
+}
+
+void exports_openssl_component_tls_method_mem_bio_client_bio_read(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        uint32_t max, openssl_list_u8_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    size_t pending = BIO_ctrl_pending(r->out_bio);
+    size_t take = pending < (size_t)max ? pending : (size_t)max;
+    if (!take) { ret->ptr = NULL; ret->len = 0; return; }
+    ret->ptr = xmalloc(take);
+    int n = BIO_read(r->out_bio, ret->ptr, (int)take);
+    if (n < 0) n = 0;
+    ret->len = (size_t)n;
+}
+
+uint32_t exports_openssl_component_tls_method_mem_bio_client_bio_pending(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    return (uint32_t)BIO_ctrl_pending(r->out_bio);
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_read(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        uint32_t max_bytes, openssl_list_u8_t *ret,
+        exports_openssl_component_tls_tls_error_t *err) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    ret->ptr = xmalloc(max_bytes ? max_bytes : 1);
+    int n = SSL_read(r->ssl, ret->ptr, (int)max_bytes);
+    if (n < 0) {
+        int e = SSL_get_error(r->ssl, n);
+        free(ret->ptr); ret->ptr = NULL; ret->len = 0;
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            err->tag = TE_WOULD_BLOCK; err->val.internal = (uint64_t)e; return false;
+        }
+        err->tag = (e == SSL_ERROR_ZERO_RETURN) ? TE_IO_CLOSED : TE_INTERNAL;
+        err->val.internal = (uint64_t)e;
+        return false;
+    }
+    ret->len = (size_t)n;
+    return true;
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_write(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_list_u8_t *data, uint32_t *written,
+        exports_openssl_component_tls_tls_error_t *err) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    if (!data->len) { *written = 0; return true; }
+    int n = SSL_write(r->ssl, data->ptr, (int)data->len);
+    if (n <= 0) {
+        int e = SSL_get_error(r->ssl, n);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            err->tag = TE_WOULD_BLOCK; err->val.internal = (uint64_t)e; return false;
+        }
+        err->tag = TE_INTERNAL; err->val.internal = (uint64_t)e;
+        return false;
+    }
+    *written = (uint32_t)n;
+    return true;
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_peer_cert_der(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_list_u8_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    X509 *cert = SSL_get1_peer_certificate(r->ssl);
+    if (!cert) return false;
+    unsigned char *buf = NULL;
+    int n = i2d_X509(cert, &buf);
+    X509_free(cert);
+    if (n <= 0) { if (buf) OPENSSL_free(buf); return false; }
+    list_u8_take(ret, buf, n);
+    OPENSSL_free(buf);
+    return true;
+}
+
+void exports_openssl_component_tls_method_mem_bio_client_version(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_string_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    const char *v = SSL_get_version(r->ssl);
+    if (!v) v = "";
+    string_take(ret, v, strlen(v));
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_selected_alpn_protocol(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        openssl_string_t *ret) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    const unsigned char *alpn = NULL;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(r->ssl, &alpn, &alpn_len);
+    if (!alpn || !alpn_len) return false;
+    string_take(ret, (const char *)alpn, alpn_len);
+    return true;
+}
+
+bool exports_openssl_component_tls_method_mem_bio_client_shutdown(
+        exports_openssl_component_tls_borrow_mem_bio_client_t self,
+        exports_openssl_component_tls_tls_error_t *err) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)self;
+    int rc = SSL_shutdown(r->ssl);
+    if (rc < 0) {
+        int e = SSL_get_error(r->ssl, rc);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            err->tag = TE_WOULD_BLOCK; err->val.internal = (uint64_t)e; return false;
+        }
+        err->tag = TE_INTERNAL; err->val.internal = (uint64_t)e;
+        return false;
+    }
+    return true;
+}
+
+void exports_openssl_component_tls_static_mem_bio_client_close(
+        exports_openssl_component_tls_own_mem_bio_client_t handle) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)
+        exports_openssl_component_tls_mem_bio_client_rep(handle);
+    if (r->ssl) { SSL_free(r->ssl); /* frees the attached BIOs */ }
+    if (r->ctx) SSL_CTX_free(r->ctx);
+    r->ssl = NULL; r->ctx = NULL; r->in_bio = NULL; r->out_bio = NULL;
+    exports_openssl_component_tls_mem_bio_client_drop_own(handle);
+}
+
+void exports_openssl_component_tls_mem_bio_client_destructor(
+        exports_openssl_component_tls_mem_bio_client_t *rep) {
+    mem_bio_client_rep *r = (mem_bio_client_rep *)rep;
+    if (!r) return;
+    if (r->ssl) SSL_free(r->ssl);  /* frees BIOs */
+    if (r->ctx) SSL_CTX_free(r->ctx);
+    keylog_buf_clear(&r->keylog);
+    free(r);
+}
