@@ -42,4 +42,5 @@ world openssl {
     import openssl:keymgmt/keymgmt@0.1.0;
     import openssl:signature/signature@0.1.0;
     import openssl:asym-cipher/asym-cipher@0.1.0;
+    import openssl:store/store@0.1.0;
 }

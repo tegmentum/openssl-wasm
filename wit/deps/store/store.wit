@@ -1,0 +1,147 @@
+// OpenSSL 3 OSSL_OP_STORE mirror. Lets a provider claim a URI
+// scheme and return certs / keys / CRLs by URI -- the standard way
+// OpenSSL 3 routes `SSL_CTX_use_certificate_file(..., "pkcs11:...")`
+// through providers instead of hard-coding file/PKCS#12/PKCS#11
+// loaders in libssl.
+//
+// Function IDs map to the OSSL_FUNC_STORE_* enum from
+// <openssl/core_dispatch.h>:
+//
+//   OPEN                     401 -> loader.open (constructor)
+//   ATTACH                   402 -> NOT MODELED (BIO-attached load
+//                                    requires the BIO bridge from
+//                                    Phase 8 backfill; skip for MVP)
+//   SETTABLE_CTX_PARAMS      403 -> settable-ctx-params (top-level)
+//   SET_CTX_PARAMS           404 -> loader.set-ctx-params
+//   LOAD                     405 -> loader.load
+//   EOF                      406 -> loader.eof
+//   CLOSE                    407 -> loader resource-drop (implicit)
+//   EXPORT_OBJECT            408 -> NOT MODELED (only used by the
+//                                    `store-load` CLI helper; not
+//                                    needed for SSL_CTX_* flows)
+//   DELETE                   409 -> loader.delete (top-level since
+//                                    delete doesn't need an open
+//                                    loader context)
+//   OPEN_EX                  410 -> NOT MODELED (variant of OPEN
+//                                    that also takes input bytes;
+//                                    pure URI-based loaders don't
+//                                    need it)
+//
+// Model shifts from the C ABI:
+//
+// 1. STORE_CLOSE collapses into the loader resource-drop (WIT
+//    destructor), same pattern as keymgmt's FREE.
+//
+// 2. STORE_LOAD in C uses an OSSL_CALLBACK invoked once per object
+//    in the stream (a single URI can yield a cert + its chain + a
+//    private key). On the WIT side `load` returns
+//    `option<store-object>` -- the caller polls until it returns
+//    `none`, mirroring the eof loop. This avoids encoding the
+//    OSSL_CALLBACK -> WIT-callback bridge while preserving multi-
+//    object semantics. The Layer-2 adapter wraps each WIT call as
+//    one OSSL_CALLBACK invocation.
+//
+// 3. STORE_LOAD's passphrase callback is OUT of scope: PKCS#11 URIs
+//    carry `pin-value=` inline (RFC 7512) and the wit-bridge URI
+//    follows suit. If you need interactive PIN entry the caller
+//    must inject it into the URI before calling.
+//
+// 4. Reference-vs-data split: when a backend can't extract a key
+//    (HSM-resident), the load callback in C sets
+//    OSSL_OBJECT_PARAM_REFERENCE pointing at an opaque blob that
+//    the matching keymgmt understands via its `load` function. We
+//    surface that directly: `store-object::key(keydata)` returns a
+//    typed `keydata` resource so the caller binds it to a signer
+//    without round-tripping through OSSL_PARAM.
+
+package openssl:store@0.1.0;
+
+interface store {
+  use openssl:pkey/pkey@0.1.0.{ossl-param, ossl-param-descriptor, pkey-error};
+  use openssl:keymgmt/keymgmt@0.1.0.{keydata};
+
+  // -------------------------------------------------------------------
+  // Object kind discriminator
+  //
+  // Maps to OSSL_OBJECT_PARAM_TYPE values in <openssl/core_object.h>:
+  //   OSSL_OBJECT_NAME    1   -> alias-only result (URI selectors)
+  //   OSSL_OBJECT_PKEY    2   -> a key (modeled as keydata resource)
+  //   OSSL_OBJECT_CERT    3   -> X.509 DER bytes
+  //   OSSL_OBJECT_CRL     4   -> X.509 CRL DER bytes
+  // -------------------------------------------------------------------
+  variant store-object {
+    /// X.509 certificate as DER. The caller decodes with d2i_X509.
+    cert(list<u8>),
+
+    /// X.509 CRL as DER. The caller decodes with d2i_X509_CRL.
+    crl(list<u8>),
+
+    /// Public or private key. The resource handle survives across
+    /// load() calls so the caller can wrap it in an EVP_PKEY and
+    /// pass it to a signer/verifier/asym-cipher context.
+    key(keydata),
+
+    /// URI-only result: the loader matched the search but only has
+    /// a name/alias, not the object bytes. The caller can re-issue
+    /// load() with the returned URI.
+    name(string),
+  }
+
+  // -------------------------------------------------------------------
+  // Top-level funcs
+  // -------------------------------------------------------------------
+
+  // OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS (403):
+  // which OSSL_PARAMs the loader accepts via set-ctx-params.
+  // Common keys: "input-type" (utf8), "expect" (utf8: "cert"|"key"|...),
+  // "subject", "issuer", "serial", "fingerprint", "alias", "properties".
+  settable-ctx-params: func() -> list<ossl-param-descriptor>;
+
+  // OpenSSL discovers store loaders via OSSL_OP_STORE provider
+  // queries that return one OSSL_ALGORITHM per supported URI scheme.
+  // The C bridge in openssl-wasm needs this list at provider-query
+  // time, before any loader is opened.
+  //
+  // Empty result = the backend doesn't currently claim any URI scheme
+  // (perfectly valid — the provider then offers nothing for
+  // OSSL_OP_STORE and OpenSSL falls back to its built-in loaders).
+  supported-schemes: func() -> list<string>;
+
+  // -------------------------------------------------------------------
+  // Loader resource (one per opened URI; CLOSE = drop)
+  // -------------------------------------------------------------------
+  resource loader {
+    // OSSL_FUNC_STORE_OPEN (401):
+    // open a loader for the given URI. The loader keeps any state
+    // it needs to stream objects out via `load` until `eof` returns
+    // true. URIs follow RFC 7512 for pkcs11:, or any scheme the
+    // backend recognizes (file:, wit-bridge:, etc.).
+    constructor(uri: string);
+
+    // OSSL_FUNC_STORE_SET_CTX_PARAMS (404):
+    // refine the search before load. `expect` narrows the next load
+    // to a single kind (cert|key|...); `subject` etc. apply to certs.
+    set-ctx-params: func(params: list<ossl-param>) -> result<_, pkey-error>;
+
+    // OSSL_FUNC_STORE_LOAD (405) — one OSSL_CALLBACK invocation per
+    // returned object. WIT-side: returns `option<store-object>`;
+    // `none` means "no object this call, check eof".
+    //
+    // Loop:
+    //   while !loader.eof()? {
+    //     if let Some(obj) = loader.load()? { use it; }
+    //   }
+    load: func() -> result<option<store-object>, pkey-error>;
+
+    // OSSL_FUNC_STORE_EOF (406):
+    // true once all objects matching the URI + ctx-params have been
+    // returned. Once eof, further load() calls are a no-op (None).
+    eof: func() -> bool;
+  }
+
+  // OSSL_FUNC_STORE_DELETE (409):
+  // top-level delete by URI (no open loader needed). The URI selectors
+  // identify the target object; backend semantics decide whether this
+  // requires write permission.
+  delete: func(uri: string) -> result<_, pkey-error>;
+}
