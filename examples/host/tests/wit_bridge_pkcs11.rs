@@ -1,0 +1,179 @@
+//! Phase 5.2 — drive `sign-with-wit-bridge` against the full stack
+//! (openssl-wasm + simple-provider-adapter + pkcs11-bridge +
+//! pkcs11-provider + softhsm2.component.wasm).
+//!
+//! Self-contained harness (doesn't use openssl-wasm-host's Fixture)
+//! because the composed stack imports `pkcs11:util/util` for the
+//! PinProvider resource type. Stubs the PinProvider with inline
+//! PINs only.
+//!
+//! Compose the stack first (see scripts/build-pkcs11-stack.sh) and
+//! point at it:
+//!
+//!   OPENSSL_WASM_COMPONENT=/tmp/owasm-full.wasm \
+//!     cargo test --release --test wit_bridge_pkcs11
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, Result};
+use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::{
+    DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+};
+
+wasmtime::component::bindgen!({
+    path: "tests/wit",
+    world: "phase5-pkcs11",
+    imports: { default: async },
+    exports: { default: async },
+});
+
+struct State {
+    table: ResourceTable,
+    ctx: WasiCtx,
+}
+impl WasiView for State {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView { ctx: &mut self.ctx, table: &mut self.table }
+    }
+}
+
+/// Stub PinProvider implementation. The composed stack never
+/// constructs one because all login uses inline pin-value from
+/// the URI -- this just satisfies the WIT type.
+pub struct HostPin;
+impl pkcs11::util::util::Host for State {}
+impl pkcs11::util::util::HostPinProvider for State {
+    async fn request_secret(
+        &mut self,
+        _self_: wasmtime::component::Resource<pkcs11::util::util::PinProvider>,
+        _label: Option<String>,
+        _attempts_remaining: Option<u8>,
+    ) -> Vec<u8> { Vec::new() }
+    async fn clear(&mut self, _: wasmtime::component::Resource<pkcs11::util::util::PinProvider>) {}
+    async fn drop(&mut self, _: wasmtime::component::Resource<pkcs11::util::util::PinProvider>) -> wasmtime::Result<()> {
+        Ok(())
+    }
+}
+
+fn stage_softhsm_dirs() -> Result<(PathBuf, PathBuf)> {
+    let run = std::env::temp_dir()
+        .join(format!("wit-bridge-pkcs11-{}", std::process::id()));
+    let cfg_dir  = run.join("config");
+    let data_dir = run.join("data");
+    std::fs::create_dir_all(&cfg_dir)?;
+    std::fs::create_dir_all(data_dir.join("tokens"))?;
+    let conf = b"directories.tokendir = /data/tokens\n\
+                 objectstore.backend = file\n\
+                 objectstore.umask = 0077\n\
+                 log.level = INFO\n\
+                 slots.removable = false\n\
+                 slots.mechanisms = ALL\n\
+                 library.reset_on_fork = false\n";
+    std::fs::write(cfg_dir.join("softhsm2-wasi.conf"), conf)?;
+    Ok((cfg_dir, data_dir))
+}
+
+#[tokio::test]
+async fn wit_bridge_signs_via_softhsm() -> Result<()> {
+    let comp_path = std::env::var("OPENSSL_WASM_COMPONENT")
+        .map_err(|_| anyhow!(
+            "set OPENSSL_WASM_COMPONENT to the composed full-stack wasm \
+             (openssl-wasm + adapter + pkcs11-bridge + pkcs11-provider \
+             + softhsm2.component)"))?;
+    let comp_path = PathBuf::from(comp_path);
+    if !Path::new(&comp_path).exists() {
+        return Err(anyhow!("component not found: {}", comp_path.display()));
+    }
+
+    let (cfg_dir, data_dir) = stage_softhsm_dirs()?;
+
+    let mut engine_cfg = Config::new();
+    engine_cfg.wasm_component_model(true);
+    engine_cfg.async_support(true);
+    let engine = Engine::new(&engine_cfg)?;
+    let component = Component::from_file(&engine, &comp_path)
+        .map_err(|e| anyhow!("loading {}: {e}", comp_path.display()))?;
+
+    let guest_stderr = MemoryOutputPipe::new(4 << 20);
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.inherit_stdin()
+        .inherit_stdout()
+        .stderr(guest_stderr.clone())
+        .env("SOFTHSM2_CONF", "/config/softhsm2-wasi.conf")
+        .preopened_dir(&cfg_dir,  "/config", DirPerms::READ, FilePerms::READ)?
+        .preopened_dir(&data_dir, "/data",   DirPerms::all(), FilePerms::all())?;
+    let state = State { table: ResourceTable::new(), ctx: wasi.build() };
+
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    pkcs11::util::util::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
+        &mut linker, |s| s,
+    )?;
+    let mut store = Store::new(&engine, state);
+    let bindings = Phase5Pkcs11::instantiate_async(&mut store, &component, &linker).await?;
+
+    let uri = "pkcs11:slot-id=0;object=phase-5-key;pin-value=1234;\
+               init=true;algorithm=ecdsa-p256".to_string();
+    let mdname = "SHA2-256".to_string();
+    let tbs    = b"phase-5 wit-bridge-via-softhsm end-to-end check".to_vec();
+
+    let result = bindings.openssl_component_wit_bridge_test()
+        .call_sign_with_wit_bridge(&mut store, &uri, &mdname, &tbs).await;
+    let sig = match result {
+        Ok(Ok(s))  => s,
+        Ok(Err(e)) => {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+            }
+            return Err(anyhow!("sign-with-wit-bridge returned err: {e}"));
+        }
+        Err(t) => {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+            }
+            return Err(anyhow!("trap: {t}"));
+        }
+    };
+
+    println!("signature: {} bytes", sig.len());
+    assert!(!sig.is_empty(), "signature should be non-empty");
+    assert_eq!(sig[0], 0x30, "ECDSA DER signature should start 0x30 (SEQUENCE)");
+    println!("\nOK -- openssl-wasm called sign-with-wit-bridge; the chain \
+              (wit-bridge -> simple-provider-adapter -> pkcs11-bridge -> \
+              pkcs11-provider -> softhsm2.component) signed inside the \
+              wasm sandbox; signature came back as DER-wrapped ECDSA.");
+
+    // -- Phase 5.3 gate: same chain but via EVP_PKEY_fromdata + EVP_DigestSign.
+    // If this works, SSL_CTX_use_PrivateKey with the same EVP_PKEY works too
+    // (TLS handshake path).
+    println!("\n[Phase 5.3] sign-via-evp-with-wit-bridge");
+    let evp_result = bindings.openssl_component_wit_bridge_test()
+        .call_sign_via_evp_with_wit_bridge(&mut store, &uri, &mdname, &tbs).await;
+    match evp_result {
+        Ok(Ok(s)) => {
+            println!("EVP signature: {} bytes", s.len());
+            assert_eq!(s[0], 0x30, "EVP ECDSA DER signature should start 0x30");
+            println!("\nOK -- EVP_DigestSign through wit-bridge produced a valid \
+                      DER signature; SSL_CTX_use_PrivateKey path works.");
+        }
+        Ok(Err(e)) => {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+            }
+            return Err(anyhow!("EVP path failed: {e}"));
+        }
+        Err(t) => return Err(anyhow!("EVP trap: {t}")),
+    }
+
+    drop((cfg_dir, data_dir));
+    Ok(())
+}

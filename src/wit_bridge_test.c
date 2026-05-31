@@ -24,6 +24,12 @@
 //   5. drop everything
 
 #include "bindings/openssl.h"
+#include "include/support.h"
+
+#include <openssl/evp.h>
+#include <openssl/err.h>
+#include <openssl/params.h>
+#include <openssl/provider.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,5 +157,132 @@ done:
     if (got_keydata) openssl_keymgmt_keymgmt_keydata_drop_own(kd);
     // Avoid unused-variable warning if helper isn't referenced.
     (void)set_err;
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// sign-via-evp-with-wit-bridge: drive the same chain via OpenSSL's
+// EVP layer. Constructs an EVP_PKEY backed by the wit-bridge keymgmt
+// via EVP_PKEY_fromdata (with a custom "wit-bridge-uri" OSSL_PARAM
+// that the simple-provider-adapter's keymgmt.import recognizes),
+// then runs EVP_DigestSign on it.
+//
+// If this works, SSL_CTX_use_PrivateKey with the same EVP_PKEY will
+// work too -- TLS handshake follows.
+// ---------------------------------------------------------------------------
+
+static void evp_err(openssl_string_t *err, const char *prefix) {
+    char accum[2048];
+    int n = snprintf(accum, sizeof(accum), "%s", prefix);
+    unsigned long e;
+    int count = 0;
+    while ((e = ERR_get_error()) != 0 && count < 10) {
+        char buf[256];
+        ERR_error_string_n(e, buf, sizeof(buf));
+        n += snprintf(accum + n,
+                      n < (int)sizeof(accum) ? (int)sizeof(accum) - n : 0,
+                      " | %s", buf);
+        count++;
+    }
+    if (count == 0) {
+        snprintf(accum + n,
+                 n < (int)sizeof(accum) ? (int)sizeof(accum) - n : 0,
+                 " (no error queue entry)");
+    }
+    openssl_string_dup(err, accum);
+}
+
+bool exports_openssl_component_wit_bridge_test_sign_via_evp_with_wit_bridge(
+        openssl_string_t *uri,
+        openssl_string_t *mdname,
+        openssl_list_u8_t *tbs,
+        openssl_list_u8_t *ret,
+        openssl_string_t *err) {
+
+    bool ok = false;
+    OSSL_PROVIDER *prov = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    EVP_MD_CTX *mdctx = NULL;
+    unsigned char *sig = NULL;
+    char *uri_c = NULL, *md_c = NULL;
+
+    uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+    md_c  = xmalloc(mdname->len + 1);
+    memcpy(md_c, mdname->ptr, mdname->len); md_c[mdname->len] = 0;
+
+    // Loading wit-bridge disables the default-provider auto-load.
+    // Reload the default explicitly so EVP_MD_fetch("SHA2-256") and
+    // friends still find their implementations.
+    OSSL_PROVIDER *def = OSSL_PROVIDER_load(NULL, "default");
+    if (!def) { evp_err(err, "OSSL_PROVIDER_load(default)"); goto done; }
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!prov) {
+        OSSL_PROVIDER_unload(def);
+        evp_err(err, "OSSL_PROVIDER_load(wit-bridge)"); goto done;
+    }
+
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=wit-bridge");
+    if (!pctx) { evp_err(err, "EVP_PKEY_CTX_new_from_name"); goto done; }
+    if (EVP_PKEY_fromdata_init(pctx) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata_init"); goto done;
+    }
+    OSSL_PARAM fd_params[] = {
+        OSSL_PARAM_utf8_string("wit-bridge-uri", uri_c, uri->len),
+        OSSL_PARAM_END,
+    };
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, fd_params) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata"); goto done;
+    }
+    if (!pkey) { openssl_string_dup(err, "EVP_PKEY_fromdata: null pkey"); goto done; }
+
+    // Use EVP_PKEY_sign (raw, no digest lookup) instead of
+    // EVP_DigestSign -- avoids the propq mismatch between keymgmt
+    // fetch and digest fetch that trips m_sigver in the
+    // EVP_DigestSign path. Hash the message ourselves with SHA-256
+    // first; CKM_ECDSA expects a pre-hashed input.
+    EVP_MD *md = EVP_MD_fetch(NULL, md_c, NULL);
+    if (!md) { evp_err(err, "EVP_MD_fetch"); goto done; }
+    unsigned char prehash[64];
+    unsigned int  prehash_len = 0;
+    if (!EVP_Digest(tbs->ptr, tbs->len, prehash, &prehash_len, md, NULL)) {
+        EVP_MD_free(md);
+        evp_err(err, "EVP_Digest"); goto done;
+    }
+    EVP_MD_free(md);
+
+    EVP_PKEY_CTX *sctx = EVP_PKEY_CTX_new_from_pkey(NULL, pkey,
+                                                    "provider=wit-bridge");
+    if (!sctx) { evp_err(err, "EVP_PKEY_CTX_new_from_pkey"); goto done; }
+    if (EVP_PKEY_sign_init(sctx) <= 0) {
+        EVP_PKEY_CTX_free(sctx);
+        evp_err(err, "EVP_PKEY_sign_init"); goto done;
+    }
+    size_t siglen = 0;
+    if (EVP_PKEY_sign(sctx, NULL, &siglen, prehash, prehash_len) <= 0) {
+        EVP_PKEY_CTX_free(sctx);
+        evp_err(err, "EVP_PKEY_sign sizing"); goto done;
+    }
+    sig = xmalloc(siglen);
+    if (EVP_PKEY_sign(sctx, sig, &siglen, prehash, prehash_len) <= 0) {
+        EVP_PKEY_CTX_free(sctx);
+        evp_err(err, "EVP_PKEY_sign final"); goto done;
+    }
+    EVP_PKEY_CTX_free(sctx);
+    (void)mdctx;  // unused in this variant
+
+    ret->ptr = sig; ret->len = siglen;
+    sig = NULL;
+    ok = true;
+
+done:
+    free(sig);
+    free(uri_c);
+    free(md_c);
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_CTX_free(pctx);
+    EVP_PKEY_free(pkey);
+    if (prov) OSSL_PROVIDER_unload(prov);
     return ok;
 }

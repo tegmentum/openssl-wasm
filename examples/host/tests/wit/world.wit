@@ -1,0 +1,11 @@
+package compose:phase5-pkcs11-test@0.1.0;
+
+// Host view of the composed openssl-wasm + simple-provider-adapter +
+// pkcs11-bridge + pkcs11-provider + softhsm2 stack. The stack
+// transitively imports pkcs11:util/util (the pin-provider resource
+// type, which the harness stubs with inline PINs) and exports
+// wit-bridge-test.
+world phase5-pkcs11 {
+    import pkcs11:util/util;
+    export openssl:component/wit-bridge-test@0.1.0;
+}
