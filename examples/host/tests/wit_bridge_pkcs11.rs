@@ -357,26 +357,20 @@ async fn wit_bridge_signs_rsa_pss_via_softhsm() -> Result<()> {
     Ok(())
 }
 
-/// Phase 8 STORE: prove OSSL_STORE_open('pkcs11:...') dispatches all
-/// the way through openssl-wasm's wit_store_dispatch -> pkcs11-store-
-/// adapter -> pkcs11:host -> SoftHSM, and bytes (or at least a key)
-/// come back.
+/// Phase 8 STORE end-to-end: prove `OSSL_STORE_open('pkcs11:...')`
+/// dispatches all the way through openssl-wasm's wit_store_dispatch
+/// -> pkcs11-store-adapter -> pkcs11:host -> SoftHSM, and the
+/// auto-provisioned key (CKO_PRIVATE_KEY) is surfaced as a
+/// key-reference that OpenSSL re-enters via keymgmt.load to
+/// materialize an EVP_PKEY.
 ///
-/// CURRENT STATE: this test FAILS because wac plug doesn't dedup
-/// pkcs11:host instances — pkcs11-bridge and pkcs11-store-adapter
-/// each get their OWN pkcs11-provider connection (different SoftHSM
-/// token databases). Bridge provisions a key in instance A; store
-/// adapter looks in instance B and finds nothing.
-///
-/// FIX: use `wac compose` with an explicit manifest that shares
-/// pkcs11-provider between adapter and bridge. The test will pass
-/// without modification once that lands.
-///
-/// Until then this test is #[ignore]'d so CI stays green. Run with
-/// `--ignored` to confirm the issue is still there (find_objects
-/// returns 0 handles -> has_key=false assert trips).
+/// Requires OPENSSL_WASM_COMPONENT to be built via `wac compose`
+/// (not `wac plug`) using scripts/wit-bridge-compose.wac in
+/// python-wasm — that's the manifest that shares ONE
+/// pkcs11-provider instance between pkcs11-bridge and
+/// pkcs11-store-adapter. `wac plug` alone creates separate provider
+/// instances, leading to silent "no objects found" failures.
 #[tokio::test]
-#[ignore = "blocked on wac compose pkcs11:host dedup — see test doc"]
 async fn wit_bridge_load_uri_through_store() -> Result<()> {
     let comp_path = std::env::var("OPENSSL_WASM_COMPONENT")
         .map_err(|_| anyhow!("set OPENSSL_WASM_COMPONENT"))?;
