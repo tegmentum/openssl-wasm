@@ -344,6 +344,18 @@ bool exports_openssl_component_pkey_static_pkey_from_wit_bridge_uri(
     prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
     if (!prov) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
 
+    // Set the libctx-wide default propq to "?provider=wit-bridge".
+    // Without this, two keymgmt fetches with different propqs in
+    // the same libctx (one when our pkey is built, another when
+    // TLS handshake fetches a matching keymgmt) get pointer-
+    // distinct EVP_KEYMGMT instances, which trips
+    // evp_pkey_export_to_provider's match check in m_sigver.c.
+    //
+    // The `?` makes it a preference, not a requirement: default-
+    // provider digests + ciphers still resolve when wit-bridge
+    // doesn't supply them.
+    EVP_set_default_properties(NULL, "?provider=wit-bridge");
+
     // Phase 5: only EC keys (matching pkcs11-bridge's Phase 4 scope).
     // Phase 8 will add RSA + Ed25519 detection here, probably by
     // asking the bridge for the algorithm via a small probe call.
