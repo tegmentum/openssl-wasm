@@ -96,8 +96,9 @@ static inline uint8_t selection_to_wit(int sel) {
 
 // Free a WIT-returned pkey-error and emit an OpenSSL error queue
 // entry summarizing it. Best-effort; the WIT side already populated
-// `err` with details.
-static void emit_pkey_error(openssl_pkey_pkey_pkey_error_t *err) {
+// `err` with details. Non-static so the OSSL_OP_STORE bridge in
+// src/store_wit.c can share the same translation.
+void emit_pkey_error(openssl_pkey_pkey_pkey_error_t *err) {
     // Phase 3: just raise a generic provider error. Phase 8 wires the
     // variant tag to specific OpenSSL reason codes via ERR_raise_data.
     ERR_raise(ERR_LIB_PROV, ERR_R_INTERNAL_ERROR);
@@ -897,6 +898,10 @@ static void strdup_first_alias(char *dst, size_t dst_sz, openssl_string_t *s) {
 // Phase 8c registers one OSSL_ALGORITHM per WIT entry (capped at
 // WIT_MAX_ALGOS) with its name-specific dispatch table so openssl
 // can fetch by name (EC -> wit_keymgmt_dispatch_ec, RSA -> _rsa).
+// Implemented in src/store_wit.c; queries openssl:store/store
+// supported-schemes() and emits one OSSL_ALGORITHM per scheme.
+extern const OSSL_ALGORITHM *build_store_algos(void);
+
 static const OSSL_ALGORITHM *build_keymgmt_algos(void) {
     if (g_keymgmt_built) return g_keymgmt_algos;
     openssl_provider_provider_tuple2_list_ossl_algorithm_bool_t tup = {
@@ -997,6 +1002,7 @@ static const OSSL_ALGORITHM *wit_provider_query_operation(
     switch (operation_id) {
         case OSSL_OP_KEYMGMT:   return build_keymgmt_algos();
         case OSSL_OP_SIGNATURE: return build_signature_algos();
+        case OSSL_OP_STORE:     return build_store_algos();
         default:                return NULL;
     }
 }
