@@ -60,9 +60,9 @@ impl pkcs11::util::util::HostPinProvider for State {
     async fn drop(&mut self, _: wasmtime::component::Resource<pkcs11::util::util::PinProvider>) -> wasmtime::Result<()> { Ok(()) }
 }
 
-fn stage_softhsm_dirs() -> Result<(PathBuf, PathBuf)> {
+fn stage_softhsm_dirs_for(tag: &str) -> Result<(PathBuf, PathBuf)> {
     let run = std::env::temp_dir()
-        .join(format!("tls-pkcs11-{}", std::process::id()));
+        .join(format!("tls-pkcs11-{}-{tag}", std::process::id()));
     let cfg_dir  = run.join("config");
     let data_dir = run.join("data");
     std::fs::create_dir_all(&cfg_dir)?;
@@ -80,6 +80,104 @@ fn stage_softhsm_dirs() -> Result<(PathBuf, PathBuf)> {
 
 #[tokio::test]
 async fn tls_server_with_pkcs11_key() -> Result<()> {
+    tls_server_with_pkcs11_key_curve("ecdsa-p256", "phase-5-tls-key").await
+}
+
+// Phase 8b² (RESOLVED): full TLS handshake with a P-384 wit-bridge
+// server key. Root cause was provider_wit.c::emit_ossl_param_to_cb
+// using the WIT-bindgen-allocated string buffer for utf8 OSSL_PARAMs
+// without space for a NUL terminator. Openssl-wasm-internal
+// consumers (e.g. inferred_keytype -> OBJ_txt2obj) grab the pointer
+// via OSSL_PARAM_get_utf8_ptr and read past data_size as a C string
+// -- finding garbage. Fix: emit_ossl_param_to_cb now allocates a
+// fresh `len + 1` buffer per utf8 param, NUL-terminates, and the
+// wit_keymgmt_export caller frees them after param_cb returns.
+//
+// Still #[ignore] because SoftHSM doesn't tolerate a second Library
+// init in the same process. Passes alone via `-- --ignored`.
+#[tokio::test]
+#[ignore = "SoftHSM single-process re-init incompat with the P-256 test in same binary"]
+async fn tls_server_with_pkcs11_key_p384() -> Result<()> {
+    tls_server_with_pkcs11_key_curve("ecdsa-p384", "phase-8b-tls-key-p384").await
+}
+
+/// Phase 8b² (RESOLVED): self-signed cert with the wit-bridge KEY as
+/// the signer. openssl-wasm's x509_build.c sign_cert_with_pkey()
+/// now bypasses the legacy X509_sign() AMETH dispatch and signs via
+/// i2d_re_X509_tbs + EVP_DigestSign + manual outer-signature
+/// stuffing. Works for any provider-only EC pkey.
+///
+/// Still #[ignore] because SoftHSM doesn't tolerate a second
+/// Library init in the same process -- this test passes when run
+/// alone via `-- --ignored`.
+#[tokio::test]
+#[ignore = "SoftHSM single-process re-init incompat with the P-256 test in same binary"]
+async fn tls_server_with_pkcs11_key_self_signed() -> Result<()> {
+    let comp_path = std::env::var("OPENSSL_WASM_COMPONENT")
+        .map_err(|_| anyhow!("set OPENSSL_WASM_COMPONENT"))?;
+    let comp_path = PathBuf::from(comp_path);
+    if !Path::new(&comp_path).exists() {
+        return Err(anyhow!("component not found"));
+    }
+    let (cfg_dir, data_dir) = stage_softhsm_dirs_for("self-signed")?;
+    let mut ec = Config::new();
+    ec.wasm_component_model(true);
+    let engine = Engine::new(&ec)?;
+    let component = Component::from_file(&engine, &comp_path)?;
+    let guest_stderr = MemoryOutputPipe::new(4 << 20);
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.inherit_stdin().inherit_stdout().stderr(guest_stderr.clone())
+        .inherit_network().allow_ip_name_lookup(true)
+        .env("SOFTHSM2_CONF", "/config/softhsm2-wasi.conf")
+        .preopened_dir(&cfg_dir, "/config", DirPerms::READ, FilePerms::READ)?
+        .preopened_dir(&data_dir, "/data",  DirPerms::all(), FilePerms::all())?;
+    let state = State { table: ResourceTable::new(), ctx: wasi.build() };
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    pkcs11::util::util::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
+        &mut linker, |s| s)?;
+    let mut store = Store::new(&engine, state);
+    let b = Phase5Tls::instantiate_async(&mut store, &component, &linker).await?;
+    let pk = b.openssl_component_pkey().pkey();
+    let xcomp = b.openssl_component_x509();
+
+    let uri = "pkcs11:slot-id=0;object=phase-8b-self-signed-key;pin-value=1234;\
+               init=true;algorithm=ecdsa-p256".to_string();
+    let key = pk.call_from_wit_bridge_uri(&mut store, &uri).await?
+        .map_err(|e| anyhow!("from-wit-bridge-uri: {e:?}"))?;
+    let subject_key = pk.call_clone(&mut store, key).await?;
+    let subject = vec![x509::NameEntry { oid: "CN".into(), value: "selfsigned".into() }];
+    let b_in = x509::CertificateBuilderInput {
+        subject: subject.clone(), issuer: subject,
+        serial_hex: Some("01".into()),
+        validity: x509::Validity {
+            not_before: "2026-01-01T00:00:00Z".into(),
+            not_after:  "2099-01-01T00:00:00Z".into(),
+        },
+        subject_alt_names: vec![],
+        key_usage: Some(x509::KeyUsage::DIGITAL_SIGNATURE),
+        extended_key_usage: vec![], basic_constraints: None,
+        subject_key,
+        signature_hash: digest::Algorithm::Sha256,
+    };
+    let r = xcomp.call_build_and_sign(&mut store, &b_in, key).await?;
+    match r {
+        Ok(_) => {
+            println!("PHASE 8b -- self-signed cert via wit-bridge key OK");
+            drop((cfg_dir, data_dir));
+            Ok(())
+        }
+        Err(e) => {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---\n{}", String::from_utf8_lossy(&logs));
+            }
+            Err(anyhow!("build_and_sign self-signed: {e:?}"))
+        }
+    }
+}
+
+async fn tls_server_with_pkcs11_key_curve(algo: &str, label: &str) -> Result<()> {
     let comp_path = std::env::var("OPENSSL_WASM_COMPONENT")
         .map_err(|_| anyhow!(
             "set OPENSSL_WASM_COMPONENT to the composed full-stack wasm"))?;
@@ -88,7 +186,7 @@ async fn tls_server_with_pkcs11_key() -> Result<()> {
         return Err(anyhow!("component not found: {}", comp_path.display()));
     }
 
-    let (cfg_dir, data_dir) = stage_softhsm_dirs()?;
+    let (cfg_dir, data_dir) = stage_softhsm_dirs_for(algo)?;
 
     let mut engine_cfg = Config::new();
     engine_cfg.wasm_component_model(true);
@@ -116,7 +214,8 @@ async fn tls_server_with_pkcs11_key() -> Result<()> {
     let mut store = Store::new(&engine, state);
     let bindings = Phase5Tls::instantiate_async(&mut store, &component, &linker).await?;
 
-    let result = run_handshake(&mut store, &bindings, guest_stderr.clone()).await;
+    let result = run_handshake(&mut store, &bindings, guest_stderr.clone(),
+                               algo, label).await;
     drop((cfg_dir, data_dir));
     result
 }
@@ -125,38 +224,49 @@ async fn run_handshake(
     store: &mut Store<State>,
     bindings: &Phase5Tls,
     guest_stderr: MemoryOutputPipe,
+    algo: &str,
+    label: &str,
 ) -> Result<()> {
     let pk = bindings.openssl_component_pkey().pkey();
     let xcomp = bindings.openssl_component_x509();
     let tlsc = bindings.openssl_component_tls();
 
-    // 1. Get the wit-bridge-backed key from the PKCS#11 URI. This is
-    //    the key TLS will use to sign the handshake.
-    let uri = "pkcs11:slot-id=0;object=phase-5-tls-key;pin-value=1234;\
-               init=true;algorithm=ecdsa-p256".to_string();
-    let server_key = pk.call_from_wit_bridge_uri(&mut *store, &uri).await?
-        .map_err(|e| anyhow!("from-wit-bridge-uri: {e:?}"))?;
+    // 1. Get the wit-bridge-backed key from the PKCS#11 URI.
+    // (For diagnosis: set DIAG_NATIVE_KEY=1 to swap wit-bridge for a
+    // generated openssl-wasm key of the same curve -- isolates whether
+    // a TLS handshake bug is wit-bridge-specific or generic.)
+    let uri = format!(
+        "pkcs11:slot-id=0;object={label};pin-value=1234;init=true;algorithm={algo}");
+    let server_key = if std::env::var("DIAG_NATIVE_KEY").is_ok() {
+        let c = match algo {
+            "ecdsa-p384" => pkey::Curve::P384,
+            "ecdsa-p521" => pkey::Curve::P521,
+            _            => pkey::Curve::P256,
+        };
+        pk.call_generate(&mut *store, pkey::KeygenParams::Ec(c)).await?
+            .map_err(|e| anyhow!("generate native: {e:?}"))?
+    } else {
+        pk.call_from_wit_bridge_uri(&mut *store, &uri).await?
+            .map_err(|e| anyhow!("from-wit-bridge-uri: {e:?}"))?
+    };
     println!("[1] obtained wit-bridge EVP_PKEY for {uri:?}");
 
     // 2. Build a cert whose SubjectPublicKey is the wit-bridge key,
-    //    but signed by a regular generated Ed25519 key.
+    //    signed by a generated ECDSA-P256 key (matches subject type,
+    //    avoids the "no shared cipher" failure that Ed25519 cert +
+    //    ECDSA key produces in TLS handshake).
     //
-    //    Why two keys: X509_sign internally uses EVP_DigestSign with
-    //    propq=NULL. OpenSSL's keymgmt-match for export-to-provider
-    //    then falls to the default provider's keymgmt, which can't
-    //    operate on a wit-bridge-backed keydata. EVP_PKEY_sign (used
-    //    by TLS's CertVerify path with an explicit ctx) doesn't have
-    //    this problem.
-    //
-    //    Test uses VerifyMode::None so the client doesn't validate
-    //    the cert chain; what matters for the handshake is that
-    //    SubjectPublicKey matches whatever signs the CertVerify --
-    //    both are the wit-bridge key.
+    //    X509_sign with the wit-bridge key itself still fails on a
+    //    different EVP path (build_and_sign reports SignFailed) --
+    //    not the same path EVP_DigestSign uses. Phase 8 follow-up.
+    let (signer_curve, sig_hash) = match algo {
+        "ecdsa-p384" => (pkey::Curve::P384, digest::Algorithm::Sha384),
+        "ecdsa-p521" => (pkey::Curve::P521, digest::Algorithm::Sha512),
+        _            => (pkey::Curve::P256, digest::Algorithm::Sha256),
+    };
     let cert_signer = pk.call_generate(&mut *store,
-        pkey::KeygenParams::Ed(pkey::EdwardsCurve::Ed25519))
+        pkey::KeygenParams::Ec(signer_curve))
         .await?.map_err(|e| anyhow!("gen cert-signer: {e:?}"))?;
-    // build_and_sign takes subject_key by OWNED pkey -- clone our
-    // wit-bridge handle so server_key stays alive for the TLS config.
     let subject_key = pk.call_clone(&mut *store, server_key).await?;
     let subject = vec![x509::NameEntry { oid: "CN".into(), value: "localhost".into() }];
     let builder = x509::CertificateBuilderInput {
@@ -175,11 +285,18 @@ async fn run_handshake(
         extended_key_usage: vec![x509::ExtendedKeyUsage::ServerAuth],
         basic_constraints: None,
         subject_key,
-        signature_hash: digest::Algorithm::Sha512,
+        signature_hash: sig_hash,
     };
     let cert = xcomp.call_build_and_sign(&mut *store, &builder, cert_signer).await?
-        .map_err(|e| anyhow!("build_and_sign: {e:?}"))?;
-    println!("[2] cert built; subject pubkey = wit-bridge, signed by ed25519");
+        .map_err(|e| {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+            }
+            anyhow!("build_and_sign: {e:?}")
+        })?;
+    println!("[2] cert built; subject pubkey = wit-bridge, signed by generated {algo}");
     let _ = digest::Algorithm::Sha256; // silence unused-import
 
     // 3. TLS server: bind listener.
@@ -220,8 +337,18 @@ async fn run_handshake(
     });
 
     // 5. Server side: accept, read, echo.
-    let conn = tlsc.server_listener().call_accept(&mut *store, listener).await?
-        .map_err(|e| anyhow!("accept: {e:?}"))?;
+    let accept_result = tlsc.server_listener().call_accept(&mut *store, listener).await?;
+    let conn = match accept_result {
+        Ok(c)  => c,
+        Err(e) => {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+            }
+            return Err(anyhow!("accept: {e:?}"));
+        }
+    };
     println!("[4] TLS handshake completed");
     let req = tlsc.server().call_read(&mut *store, conn, 256).await?
         .map_err(|e| anyhow!("server read: {e:?}"))?;
