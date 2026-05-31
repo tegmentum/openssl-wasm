@@ -6,11 +6,16 @@ package openssl:noop-provider@0.1.0;
 // openssl-wasm + noop-provider composition behaves exactly like
 // pre-Phase-2 openssl-wasm did).
 //
-// Exports the same five interfaces the openssl-wasm world imports.
+// Exports the six interfaces the openssl-wasm world imports.
 world noop {
   export openssl:pkey/pkey@0.1.0;
   export openssl:provider/provider@0.1.0;
   export openssl:keymgmt/keymgmt@0.1.0;
   export openssl:signature/signature@0.1.0;
   export openssl:asym-cipher/asym-cipher@0.1.0;
+  // Phase 8: STORE op. noop returns supported-schemes=[] so OpenSSL
+  // never opens a loader against the noop provider; the loader
+  // resource is still implemented (no-op) so wac plug can satisfy
+  // openssl-wasm's import.
+  export openssl:store/store@0.1.0;
 }

@@ -464,3 +464,63 @@ bool exports_openssl_asym_cipher_asym_cipher_method_asym_cipher_context_set_ctx_
 
 // PKEY no longer has resources -- the refactored WIT moved them to
 // keymgmt/signature/asym-cipher where their methods live.
+
+// =========================================================================
+// STORE  (Phase 8) — every loader is a no-op. supported-schemes=[]
+// keeps OpenSSL from ever calling constructor_loader, so the body of
+// each loader method is unreachable in practice; we still implement
+// them so wac plug can satisfy the openssl-wasm import.
+// =========================================================================
+
+void exports_openssl_store_store_settable_ctx_params(
+        exports_openssl_store_store_list_ossl_param_descriptor_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+void exports_openssl_store_store_supported_schemes(noop_list_string_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+bool exports_openssl_store_store_delete(noop_string_t *uri,
+                                        exports_openssl_store_store_pkey_error_t *err) {
+    (void)uri; ERR_NS(err); return false;
+}
+
+// Minimal `rep` -- just one byte; resource-rep round-trips need a
+// stable non-NULL pointer per WIT borrow semantics.
+typedef struct { uint8_t marker; } noop_loader_rep_t;
+static noop_loader_rep_t g_noop_loader = { 0xAA };
+
+exports_openssl_store_store_own_loader_t
+exports_openssl_store_store_constructor_loader(noop_string_t *uri) {
+    (void)uri;
+    return exports_openssl_store_store_loader_new(
+        (exports_openssl_store_store_loader_t *)&g_noop_loader);
+}
+
+void exports_openssl_store_store_loader_destructor(
+        exports_openssl_store_store_loader_t *rep) {
+    (void)rep;  // static singleton; nothing to free
+}
+
+bool exports_openssl_store_store_method_loader_set_ctx_params(
+        exports_openssl_store_store_borrow_loader_t self,
+        exports_openssl_store_store_list_ossl_param_t *params,
+        exports_openssl_store_store_pkey_error_t *err) {
+    (void)self; (void)params; (void)err;
+    return true;
+}
+
+bool exports_openssl_store_store_method_loader_load(
+        exports_openssl_store_store_borrow_loader_t self,
+        exports_openssl_store_store_option_store_object_t *ret,
+        exports_openssl_store_store_pkey_error_t *err) {
+    (void)self; (void)err;
+    ret->is_some = false;
+    return true;
+}
+
+bool exports_openssl_store_store_method_loader_eof(
+        exports_openssl_store_store_borrow_loader_t self) {
+    (void)self; return true;
+}
