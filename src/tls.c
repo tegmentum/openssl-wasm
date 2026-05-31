@@ -683,6 +683,18 @@ bool exports_openssl_component_tls_method_server_listener_accept(
 
     if (SSL_accept(ssl) != 1) {
         int e = SSL_get_error(ssl, -1);
+        // Phase 8a diagnostic: dump the full openssl error queue to
+        // stderr so the host harness can see what failed inside the
+        // handshake (otherwise the high-level TE_HANDSHAKE error code
+        // loses all context). Caller can grep for "tls accept:" in
+        // the guest stderr capture.
+        fprintf(stderr, "tls accept: SSL_accept failed, SSL_get_error=%d\n", e);
+        unsigned long oe;
+        while ((oe = ERR_get_error()) != 0) {
+            char buf[256];
+            ERR_error_string_n(oe, buf, sizeof(buf));
+            fprintf(stderr, "  err: %s\n", buf);
+        }
         if (pre_keylog) { keylog_buf_clear(pre_keylog); free(pre_keylog); }
         SSL_free(ssl); close(cfd);
         err->tag = TE_HANDSHAKE; err->val.internal = (uint64_t)e;

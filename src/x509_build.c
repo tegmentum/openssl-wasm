@@ -31,6 +31,16 @@
 #define XE_ENCODING    EXPORTS_OPENSSL_COMPONENT_X509_X509_ERROR_ENCODING_FAILED
 #define XE_INTERNAL    EXPORTS_OPENSSL_COMPONENT_X509_X509_ERROR_INTERNAL
 
+// Provider-compatible cert/CSR signing — replaces the legacy
+// X509_sign / X509_REQ_sign which dispatch via EVP_PKEY's AMETH and
+// don't work with provider-only pkeys (wit-bridge, pkcs11).
+static bool sign_cert_with_pkey(X509 *c, EVP_PKEY *signer,
+                                exports_openssl_component_x509_hash_t hash,
+                                exports_openssl_component_x509_x509_error_t *err);
+static bool sign_csr_with_pkey(X509_REQ *r, EVP_PKEY *signer,
+                               exports_openssl_component_x509_hash_t hash,
+                               exports_openssl_component_x509_x509_error_t *err);
+
 static X509_NAME *build_name(const exports_openssl_component_x509_name_t *n) {
     X509_NAME *nm = X509_NAME_new();
     if (!nm) return NULL;
@@ -312,16 +322,216 @@ bool exports_openssl_component_x509_build_and_sign(
         BASIC_CONSTRAINTS_free(bc);
     }
 
-    // Ed25519/Ed448 sign with built-in hash; pass NULL as the digest.
-    int sid = EVP_PKEY_get_base_id((EVP_PKEY *)signer);
-    const EVP_MD *md = (sid == EVP_PKEY_ED25519 || sid == EVP_PKEY_ED448)
-        ? NULL : wit_digest_md(input->signature_hash);
-    if (!X509_sign(c, (EVP_PKEY *)signer, md)) {
+    // Sign via the modern EVP_DigestSignInit_ex path. The legacy
+    // X509_sign() goes through ASN1_item_sign which dispatches on
+    // EVP_PKEY's AMETH -- provider-only pkeys (wit-bridge / pkcs11)
+    // have no AMETH and trip asn1::digest-and-key-type-not-supported.
+    // X509_sign_ctx with an EVP_MD_CTX seeded via
+    // EVP_DigestSignInit_ex uses the OSSL_OP_SIGNATURE provider
+    // dispatch directly, so it works for both legacy and
+    // provider-backed keys.
+    if (!sign_cert_with_pkey(c, (EVP_PKEY *)signer, input->signature_hash, err)) {
         X509_free(c);
-        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
         return false;
     }
     *ret = cert_handle_(c);
+    return true;
+}
+
+/// Compute the X.509 signature-algorithm NID from (digest, pkey).
+/// Returns NID_undef if no sigalg is registered for the pair.
+static int sigalg_nid_for(EVP_PKEY *pkey, exports_openssl_component_x509_hash_t hash) {
+    int sid = EVP_PKEY_get_base_id(pkey);
+    if (sid == EVP_PKEY_ED25519) return NID_ED25519;
+    if (sid == EVP_PKEY_ED448)   return NID_ED448;
+    const EVP_MD *md = wit_digest_md(hash);
+    if (!md) return NID_undef;
+    int signid;
+    if (!OBJ_find_sigid_by_algs(&signid, EVP_MD_nid(md), sid)) return NID_undef;
+    return signid;
+}
+
+/// Sign an X509 manually via EVP_DigestSign — bypasses
+/// X509_sign{,_ctx}() which both dispatch through pkey->ameth's
+/// item_sign for legacy keys. Provider-only pkeys (wit-bridge,
+/// pkcs11) have an auto-populated AMETH that tries to extract a
+/// legacy EC_KEY structure, fails, and trips
+/// `asn1::digest-and-key-type-not-supported`.
+///
+/// Strategy:
+///   1. Set both tbsCertificate.signature (inner) and X509's outer
+///      signatureAlgorithm to the (digest, key-type) sigalg OID.
+///   2. Serialize tbsCertificate -> DER via i2d_re_X509_tbs.
+///   3. EVP_DigestSign over the TBS bytes -> signature.
+///   4. Set the X509's outer signature ASN1_BIT_STRING.
+static bool sign_cert_with_pkey(X509 *c, EVP_PKEY *signer,
+                                exports_openssl_component_x509_hash_t hash,
+                                exports_openssl_component_x509_x509_error_t *err) {
+    int sid = EVP_PKEY_get_base_id(signer);
+    const char *mdname = (sid == EVP_PKEY_ED25519 || sid == EVP_PKEY_ED448)
+        ? NULL : wit_digest_name(hash);
+    int signid = sigalg_nid_for(signer, hash);
+    if (signid == NID_undef) {
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    // openssl doesn't expose a setter for the X509 outer sigalg,
+    // but X509_get0_signature returns the owned struct fields via
+    // const pointers -- cast away and mutate in place. This is the
+    // pattern openssl source itself uses internally for back-compat.
+    X509_ALGOR *tbs_alg = (X509_ALGOR *)X509_get0_tbs_sigalg(c);
+    const ASN1_BIT_STRING *outer_sig_const = NULL;
+    const X509_ALGOR *outer_alg_const = NULL;
+    X509_get0_signature(&outer_sig_const, &outer_alg_const, c);
+    X509_ALGOR *outer_alg = (X509_ALGOR *)outer_alg_const;
+    ASN1_BIT_STRING *outer_sig = (ASN1_BIT_STRING *)outer_sig_const;
+    if (!tbs_alg || !outer_alg || !outer_sig) {
+        err->tag = XE_INTERNAL; return false;
+    }
+    ASN1_OBJECT *oid = OBJ_nid2obj(signid);
+    if (!oid
+        || !X509_ALGOR_set0(tbs_alg,  OBJ_dup(oid), V_ASN1_UNDEF, NULL)
+        || !X509_ALGOR_set0(outer_alg, OBJ_dup(oid), V_ASN1_UNDEF, NULL))
+    {
+        err->tag = XE_INTERNAL; return false;
+    }
+
+    // Serialize the TBS portion. i2d_re_X509_tbs forces a fresh
+    // encode (vs the cached enc on the X509 struct).
+    unsigned char *tbs_der = NULL;
+    int tbs_len = i2d_re_X509_tbs(c, &tbs_der);
+    if (tbs_len <= 0 || !tbs_der) {
+        err->tag = XE_ENCODING; err->val.internal = ERR_peek_last_error();
+        OPENSSL_free(tbs_der);
+        return false;
+    }
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    if (EVP_DigestSignInit_ex(mdctx, NULL, mdname, NULL, NULL, signer, NULL) != 1) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    size_t siglen = 0;
+    // One-shot path: EVP_DigestSign with sig=NULL probes size, then signs.
+    // The wit-bridge sign returns a generous 512-byte upper bound for the
+    // size probe (ECDSA DER varies 70..72 for P-256); allocate based on it
+    // and re-call. For non-provider keys EVP_DigestSign answers exactly.
+    if (EVP_DigestSign(mdctx, NULL, &siglen, tbs_der, tbs_len) != 1 || siglen == 0) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    unsigned char *sig = OPENSSL_malloc(siglen);
+    if (!sig) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_INTERNAL; return false;
+    }
+    if (EVP_DigestSign(mdctx, sig, &siglen, tbs_der, tbs_len) != 1) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der); OPENSSL_free(sig);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    EVP_MD_CTX_free(mdctx);
+    OPENSSL_free(tbs_der);
+
+    // Stuff the signature bytes into the X509's outer BIT STRING.
+    // ASN1_BIT_STRING_set takes ownership of `sig` via a malloc'd copy
+    // internally; we still own our buffer.
+    if (!ASN1_BIT_STRING_set(outer_sig, sig, (int)siglen)) {
+        OPENSSL_free(sig);
+        err->tag = XE_ENCODING; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    // The DER value bits are: 8 bits per byte, no unused bits, primitive.
+    outer_sig->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    outer_sig->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    OPENSSL_free(sig);
+    return true;
+}
+
+/// Sign an X509_REQ manually -- same rationale as sign_cert_with_pkey.
+/// CSR exposes proper public setters (X509_REQ_set0_signature +
+/// X509_REQ_set1_signature_algo), so the structure manipulation
+/// is cleaner than for X509.
+static bool sign_csr_with_pkey(X509_REQ *r, EVP_PKEY *signer,
+                               exports_openssl_component_x509_hash_t hash,
+                               exports_openssl_component_x509_x509_error_t *err) {
+    int sid = EVP_PKEY_get_base_id(signer);
+    const char *mdname = (sid == EVP_PKEY_ED25519 || sid == EVP_PKEY_ED448)
+        ? NULL : wit_digest_name(hash);
+    int signid = sigalg_nid_for(signer, hash);
+    if (signid == NID_undef) {
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+
+    // Build the sigalg AlgorithmIdentifier.
+    X509_ALGOR *alg = X509_ALGOR_new();
+    if (!alg
+        || !X509_ALGOR_set0(alg, OBJ_dup(OBJ_nid2obj(signid)), V_ASN1_UNDEF, NULL)
+        || !X509_REQ_set1_signature_algo(r, alg))
+    {
+        X509_ALGOR_free(alg);
+        err->tag = XE_INTERNAL; return false;
+    }
+    X509_ALGOR_free(alg);  // X509_REQ_set1 dup'd internally
+
+    // Serialize CSR's TBS portion.
+    unsigned char *tbs_der = NULL;
+    int tbs_len = i2d_re_X509_REQ_tbs(r, &tbs_der);
+    if (tbs_len <= 0 || !tbs_der) {
+        OPENSSL_free(tbs_der);
+        err->tag = XE_ENCODING; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    if (EVP_DigestSignInit_ex(mdctx, NULL, mdname, NULL, NULL, signer, NULL) != 1) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    size_t siglen = 0;
+    if (EVP_DigestSign(mdctx, NULL, &siglen, tbs_der, tbs_len) != 1 || siglen == 0) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    unsigned char *sig = OPENSSL_malloc(siglen);
+    if (!sig) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der);
+        err->tag = XE_INTERNAL; return false;
+    }
+    if (EVP_DigestSign(mdctx, sig, &siglen, tbs_der, tbs_len) != 1) {
+        EVP_MD_CTX_free(mdctx); OPENSSL_free(tbs_der); OPENSSL_free(sig);
+        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    EVP_MD_CTX_free(mdctx);
+    OPENSSL_free(tbs_der);
+
+    ASN1_BIT_STRING *bs = ASN1_BIT_STRING_new();
+    if (!bs || !ASN1_BIT_STRING_set(bs, sig, (int)siglen)) {
+        OPENSSL_free(sig);
+        ASN1_BIT_STRING_free(bs);
+        err->tag = XE_ENCODING; err->val.internal = ERR_peek_last_error();
+        return false;
+    }
+    bs->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    bs->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    OPENSSL_free(sig);
+    X509_REQ_set0_signature(r, bs);  // takes ownership
     return true;
 }
 
@@ -359,12 +569,8 @@ bool exports_openssl_component_x509_static_csr_build_and_sign(
         sk_X509_EXTENSION_pop_free(exts, X509_EXTENSION_free);
     }
 
-    int sid = EVP_PKEY_get_base_id((EVP_PKEY *)key);
-    const EVP_MD *md = (sid == EVP_PKEY_ED25519 || sid == EVP_PKEY_ED448)
-        ? NULL : wit_digest_md(signature_hash);
-    if (!X509_REQ_sign(r, (EVP_PKEY *)key, md)) {
+    if (!sign_csr_with_pkey(r, (EVP_PKEY *)key, signature_hash, err)) {
         X509_REQ_free(r);
-        err->tag = XE_SIGN; err->val.internal = ERR_peek_last_error();
         return false;
     }
     *ret = csr_handle_(r);

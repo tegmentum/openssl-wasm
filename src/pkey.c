@@ -3,6 +3,7 @@
 #include "bindings/openssl.h"
 #include "include/support.h"
 #include "include/algs.h"
+#include <string.h>
 
 #include <openssl/bio.h>
 #include <openssl/core_names.h>
@@ -344,22 +345,30 @@ bool exports_openssl_component_pkey_static_pkey_from_wit_bridge_uri(
     prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
     if (!prov) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
 
-    // Set the libctx-wide default propq to "?provider=wit-bridge".
-    // Without this, two keymgmt fetches with different propqs in
-    // the same libctx (one when our pkey is built, another when
-    // TLS handshake fetches a matching keymgmt) get pointer-
-    // distinct EVP_KEYMGMT instances, which trips
-    // evp_pkey_export_to_provider's match check in m_sigver.c.
-    //
-    // The `?` makes it a preference, not a requirement: default-
-    // provider digests + ciphers still resolve when wit-bridge
-    // doesn't supply them.
-    EVP_set_default_properties(NULL, "?provider=wit-bridge");
+    // No libctx-default propq -- that broke EC keygen (wit-bridge
+    // won the keymgmt fetch but doesn't support gen-init). The
+    // per-fetch propq on the EVP_PKEY_CTX_new_from_name call below
+    // is enough now that Phase 8a's expanded settable_ctx_params
+    // resolved the ctrl_params_translate path.
 
-    // Phase 5: only EC keys (matching pkcs11-bridge's Phase 4 scope).
-    // Phase 8 will add RSA + Ed25519 detection here, probably by
-    // asking the bridge for the algorithm via a small probe call.
-    pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=wit-bridge");
+    // Pick the keymgmt name based on the URI's algorithm flag.
+    // Conservative heuristic: anything starting with "rsa" -> RSA;
+    // everything else (ecdsa-pNNN, default) -> EC. The PKCS#11 URI
+    // grammar already standardises `algorithm=` as a name-attr we
+    // can probe without a roundtrip into the bridge. Phase 8c.
+    const char *km_name = "EC";
+    {
+        const char *p = strstr(uri_c, "algorithm=");
+        if (p) {
+            p += strlen("algorithm=");
+            // ASCII case-insensitive prefix match.
+            if ((p[0] == 'r' || p[0] == 'R') &&
+                (p[1] == 's' || p[1] == 'S') &&
+                (p[2] == 'a' || p[2] == 'A'))
+                km_name = "RSA";
+        }
+    }
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, km_name, "provider=wit-bridge");
     if (!pctx) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
     if (EVP_PKEY_fromdata_init(pctx) <= 0) {
         err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail;

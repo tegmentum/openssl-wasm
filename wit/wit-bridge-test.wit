@@ -22,10 +22,19 @@ interface wit-bridge-test {
   ) -> result<list<u8>, string>;
 
   /// Like sign-with-wit-bridge but routes through OpenSSL's EVP
-  /// layer (EVP_PKEY_fromdata + EVP_DigestSign). This is the path
-  /// the TLS handshake will use -- if this works, SSL_CTX_use_PrivateKey
-  /// with a wit-bridge-backed EVP_PKEY also works.
+  /// layer (EVP_PKEY_fromdata + EVP_PKEY_sign with manual prehash).
+  /// Avoids EVP_DigestSign's m_sigver path.
   sign-via-evp-with-wit-bridge: func(
+    uri: string,
+    mdname: string,
+    tbs: list<u8>,
+  ) -> result<list<u8>, string>;
+
+  /// EVP_DigestSign variant -- the exact path TLS uses. Phase 8a
+  /// diagnostic for the open question from Phase 5.4: why does this
+  /// path fail when the EVP_PKEY_sign + manual-prehash variant
+  /// succeeds?
+  digest-sign-via-evp-with-wit-bridge: func(
     uri: string,
     mdname: string,
     tbs: list<u8>,

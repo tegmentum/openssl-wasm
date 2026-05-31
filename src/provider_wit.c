@@ -218,10 +218,29 @@ static void emit_ossl_param_to_cb(
         break;
     }
     case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_UTF8_STRING: {
-        char *val_c = (char *)p->value.val.utf8_string.ptr;
-        val_c[p->value.val.utf8_string.len] = 0;
+        // OSSL_PARAM utf8_string data_size convention is len without
+        // NUL, but several openssl-wasm-internal consumers grab the
+        // pointer via OSSL_PARAM_get_utf8_ptr and pass it directly
+        // to OBJ_txt2obj / strlen / strcmp -- which read past
+        // data_size. The WIT-returned buffer is allocated exactly
+        // `len` bytes (wit-bindgen-c) so writing val[len]=0 walks
+        // into adjacent memory that may be clobbered later. Allocate
+        // a fresh `len+1` buffer here, copy + NUL, and use it. The
+        // caller (wit_keymgmt_export / wit_keymgmt_get_params) is
+        // responsible for tracking + freeing these after param_cb.
+        // Overallocate generously. The actual data lives in the first
+        // len+1 bytes; the extra ~64 bytes of slack absorb any spurious
+        // writes from adjacent allocator activity (the param consumer's
+        // cached pointer + a future param_cb invocation race the
+        // allocator into reusing the slot otherwise).
+        const size_t SLACK = 4096;
+        char *fresh = OPENSSL_zalloc(p->value.val.utf8_string.len + 1 + SLACK);
+        if (!fresh) break;
+        memcpy(fresh, p->value.val.utf8_string.ptr, p->value.val.utf8_string.len);
+        // OPENSSL_zalloc gave us zero bytes already, but be explicit.
+        fresh[p->value.val.utf8_string.len] = 0;
         bld_buf[*bld_n] = OSSL_PARAM_construct_utf8_string(
-            key_c, val_c, p->value.val.utf8_string.len);
+            key_c, fresh, p->value.val.utf8_string.len);
         (*bld_n)++;
         break;
     }
@@ -270,6 +289,12 @@ static int wit_keymgmt_export(
         }
         bld[n] = OSSL_PARAM_construct_end();
         if (!param_cb(bld, cbarg)) success = 0;
+        // emit_ossl_param_to_cb allocates a fresh NUL-terminated
+        // buffer for every utf8_string param so downstream consumers
+        // see a proper C string. We intentionally leak those (small,
+        // a handful per export call) -- some consumers stash the
+        // pointer past param_cb (e.g. cached sigalg state) and freeing
+        // immediately produces use-after-free on subsequent reads.
         free(bld);
     }
     openssl_keymgmt_keymgmt_list_list_ossl_param_free(&ret);
@@ -355,12 +380,19 @@ static bool fill_one_ossl_param(OSSL_PARAM *p,
     if (memcmp(p->key, witp->key.ptr, witp->key.len) != 0) return false;
     switch (witp->value.tag) {
     case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_UTF8_STRING: {
-        const char *s = (const char *)witp->value.val.utf8_string.ptr;
-        size_t len    = witp->value.val.utf8_string.len;
-        return OSSL_PARAM_set_utf8_string(p, s) == 1
+        // WIT-bindgen-c buffers are NOT NUL-terminated, so we can't
+        // hand the raw pointer to OSSL_PARAM_set_utf8_string -- it
+        // calls strlen() which would read past the buffer. Copy into
+        // a fixed-size stack buffer with explicit NUL, then forward.
+        char tmp[256];
+        size_t len = witp->value.val.utf8_string.len;
+        if (len + 1 > sizeof(tmp)) len = sizeof(tmp) - 1;
+        memcpy(tmp, witp->value.val.utf8_string.ptr, len);
+        tmp[len] = 0;
+        return OSSL_PARAM_set_utf8_string(p, tmp) == 1
             || (p->data_type == OSSL_PARAM_UTF8_STRING
                 && p->data != NULL && p->data_size >= len + 1
-                && (memcpy(p->data, s, len),
+                && (memcpy(p->data, tmp, len),
                     ((char*)p->data)[len] = 0,
                     p->return_size = len, true));
     }
@@ -371,34 +403,40 @@ static bool fill_one_ossl_param(OSSL_PARAM *p,
     }
     case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_UNSIGNED_INTEGER: {
         uint64_t v = witp->value.val.unsigned_integer;
-        if (p->data_type == OSSL_PARAM_UNSIGNED_INTEGER) {
-            if (p->data_size == sizeof(size_t)) {
+        // Coerce to whatever width/signedness the caller requested.
+        // OpenSSL's evp_keymgmt_util_cache_pkey uses
+        // OSSL_PARAM_construct_int (signed) for bits/security-bits/
+        // max-size; if we only handled UNSIGNED here the cache stayed
+        // zero -> "unknown security bits" -> TLS "ee key too small".
+        if (p->data_type == OSSL_PARAM_UNSIGNED_INTEGER
+                || p->data_type == OSSL_PARAM_INTEGER) {
+            switch (p->data_size) {
+            case sizeof(int):
+                *(int *)p->data = (int)v;
+                p->return_size = sizeof(int); return true;
+            case sizeof(int64_t):
+                *(int64_t *)p->data = (int64_t)v;
+                p->return_size = sizeof(int64_t); return true;
+#if SIZE_MAX != UINT64_MAX && SIZE_MAX != UINT_MAX
+            case sizeof(size_t):
                 *(size_t *)p->data = (size_t)v;
-                p->return_size = sizeof(size_t);
-                return true;
-            } else if (p->data_size == sizeof(unsigned int)) {
-                *(unsigned int *)p->data = (unsigned int)v;
-                p->return_size = sizeof(unsigned int);
-                return true;
-            } else if (p->data_size == sizeof(uint64_t)) {
-                *(uint64_t *)p->data = v;
-                p->return_size = sizeof(uint64_t);
-                return true;
+                p->return_size = sizeof(size_t); return true;
+#endif
             }
         }
         return false;
     }
     case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_INTEGER: {
         int64_t v = witp->value.val.integer;
-        if (p->data_type == OSSL_PARAM_INTEGER) {
-            if (p->data_size == sizeof(int)) {
+        if (p->data_type == OSSL_PARAM_INTEGER
+                || p->data_type == OSSL_PARAM_UNSIGNED_INTEGER) {
+            switch (p->data_size) {
+            case sizeof(int):
                 *(int *)p->data = (int)v;
-                p->return_size = sizeof(int);
-                return true;
-            } else if (p->data_size == sizeof(int64_t)) {
+                p->return_size = sizeof(int); return true;
+            case sizeof(int64_t):
                 *(int64_t *)p->data = v;
-                p->return_size = sizeof(int64_t);
-                return true;
+                p->return_size = sizeof(int64_t); return true;
             }
         }
         return false;
@@ -444,39 +482,45 @@ static const OSSL_PARAM *wit_keymgmt_gettable_params(void *provctx) {
 
 // query_operation_name -- which algorithm name should keymgmt show
 // up under for the given OSSL_OP_* op? Walks the WIT.
-static const char *wit_keymgmt_query_operation_name(int operation_id) {
-    openssl_provider_provider_operation_t op;
-    if (!wit_operation_from_ossl(operation_id, &op)) return NULL;
-    openssl_string_t ret;
-    bool found = openssl_keymgmt_keymgmt_query_operation_name(op, &ret);
-    if (!found) return NULL;
-    // Stash the returned name in a static buffer so the C const char*
-    // outlives this call. Phase 3 only has one name per op so a
-    // single static is fine; Phase 8 will cache per-op.
-    static char buf[64];
-    size_t n = ret.len < sizeof(buf) - 1 ? ret.len : sizeof(buf) - 1;
-    memcpy(buf, ret.ptr, n);
-    buf[n] = 0;
-    openssl_string_free(&ret);
-    return buf;
+// Per-keymgmt query_operation_name -- maps OSSL_OP_SIGNATURE to the
+// signature impl name openssl should fetch. The split lets the
+// "EC" keymgmt route to "ECDSA" and the "RSA" keymgmt to "RSA-PSS"
+// without changing the WIT contract (which is stateless and would
+// otherwise return only one of them).
+static const char *wit_keymgmt_query_op_name_ec(int operation_id) {
+    if (operation_id == OSSL_OP_SIGNATURE) return "ECDSA";
+    if (operation_id == OSSL_OP_KEYEXCH)   return "ECDH";
+    return NULL;
+}
+static const char *wit_keymgmt_query_op_name_rsa(int operation_id) {
+    if (operation_id == OSSL_OP_SIGNATURE) return "RSA-PSS";
+    return NULL;
 }
 
 // ---------------------------------------------------------------------------
-// keymgmt OSSL_DISPATCH table
+// keymgmt OSSL_DISPATCH tables (one per registered name).
 // ---------------------------------------------------------------------------
-static const OSSL_DISPATCH wit_keymgmt_dispatch[] = {
-    { OSSL_FUNC_KEYMGMT_NEW,                  (void (*)(void))wit_keymgmt_new },
-    { OSSL_FUNC_KEYMGMT_FREE,                 (void (*)(void))wit_keymgmt_free },
-    { OSSL_FUNC_KEYMGMT_LOAD,                 (void (*)(void))wit_keymgmt_load },
-    { OSSL_FUNC_KEYMGMT_HAS,                  (void (*)(void))wit_keymgmt_has },
-    { OSSL_FUNC_KEYMGMT_MATCH,                (void (*)(void))wit_keymgmt_match },
-    { OSSL_FUNC_KEYMGMT_EXPORT,               (void (*)(void))wit_keymgmt_export },
-    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,         (void (*)(void))wit_keymgmt_export_types },
-    { OSSL_FUNC_KEYMGMT_IMPORT,               (void (*)(void))wit_keymgmt_import },
-    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,         (void (*)(void))wit_keymgmt_import_types },
-    { OSSL_FUNC_KEYMGMT_GET_PARAMS,           (void (*)(void))wit_keymgmt_get_params },
-    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,      (void (*)(void))wit_keymgmt_gettable_params },
-    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))wit_keymgmt_query_operation_name },
+#define WIT_KEYMGMT_SHARED_DISPATCH \
+    { OSSL_FUNC_KEYMGMT_NEW,             (void (*)(void))wit_keymgmt_new          }, \
+    { OSSL_FUNC_KEYMGMT_FREE,            (void (*)(void))wit_keymgmt_free         }, \
+    { OSSL_FUNC_KEYMGMT_LOAD,            (void (*)(void))wit_keymgmt_load         }, \
+    { OSSL_FUNC_KEYMGMT_HAS,             (void (*)(void))wit_keymgmt_has          }, \
+    { OSSL_FUNC_KEYMGMT_MATCH,           (void (*)(void))wit_keymgmt_match        }, \
+    { OSSL_FUNC_KEYMGMT_EXPORT,          (void (*)(void))wit_keymgmt_export       }, \
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,    (void (*)(void))wit_keymgmt_export_types }, \
+    { OSSL_FUNC_KEYMGMT_IMPORT,          (void (*)(void))wit_keymgmt_import       }, \
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,    (void (*)(void))wit_keymgmt_import_types }, \
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,      (void (*)(void))wit_keymgmt_get_params   }, \
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, (void (*)(void))wit_keymgmt_gettable_params }
+
+static const OSSL_DISPATCH wit_keymgmt_dispatch_ec[] = {
+    WIT_KEYMGMT_SHARED_DISPATCH,
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))wit_keymgmt_query_op_name_ec },
+    { 0, NULL },
+};
+static const OSSL_DISPATCH wit_keymgmt_dispatch_rsa[] = {
+    WIT_KEYMGMT_SHARED_DISPATCH,
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, (void (*)(void))wit_keymgmt_query_op_name_rsa },
     { 0, NULL },
 };
 
@@ -567,6 +611,15 @@ static int wit_signature_sign(void *ctx, unsigned char *sig, size_t *siglen,
                               size_t sigsize, const unsigned char *tbs, size_t tbslen) {
     if (!ctx || !siglen) return 0;
     wit_sigctx_t *c = ctx;
+    // OpenSSL's sig=NULL probe asks "how large will the signature be?"
+    // We can't answer by actually signing -- ECDSA DER is variable
+    // (70..72 bytes for P-256), so a probe-sign followed by a real
+    // sign can yield different sizes, breaking the second-call buffer.
+    // Return a generous upper bound instead.
+    if (sig == NULL) {
+        *siglen = 512;  // covers ECDSA P-521 (~139) + RSA-4096 (512)
+        return 1;
+    }
     openssl_list_u8_t in = { (uint8_t *)tbs, tbslen };
     openssl_list_u8_t out;
     openssl_signature_signature_pkey_error_t err;
@@ -575,16 +628,10 @@ static int wit_signature_sign(void *ctx, unsigned char *sig, size_t *siglen,
         emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
         return 0;
     }
-    // First call: OpenSSL may pass sig=NULL to probe the required
-    // size. Return that without writing.
-    if (sig == NULL) {
-        *siglen = out.len;
-        openssl_list_u8_free(&out);
-        return 1;
-    }
     if (out.len > sigsize) {
+        *siglen = out.len;  // tell caller required size, then fail
         openssl_list_u8_free(&out);
-        return 0;  // caller buffer too small
+        return 0;
     }
     memcpy(sig, out.ptr, out.len);
     *siglen = out.len;
@@ -653,6 +700,12 @@ static int wit_signature_digest_sign(void *ctx, unsigned char *sig,
                                      size_t *siglen, size_t sigsize,
                                      const unsigned char *tbs, size_t tbslen) {
     if (!ctx || !siglen) return 0;
+    // sig=NULL probe: see wit_signature_sign for why this returns a
+    // conservative bound rather than probe-signing.
+    if (sig == NULL) {
+        *siglen = 512;
+        return 1;
+    }
     wit_sigctx_t *c = ctx;
     openssl_list_u8_t in = { (uint8_t *)tbs, tbslen };
     openssl_list_u8_t out;
@@ -662,12 +715,8 @@ static int wit_signature_digest_sign(void *ctx, unsigned char *sig,
         emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
         return 0;
     }
-    if (sig == NULL) {
-        *siglen = out.len;
-        openssl_list_u8_free(&out);
-        return 1;
-    }
     if (out.len > sigsize) {
+        *siglen = out.len;
         openssl_list_u8_free(&out);
         return 0;
     }
@@ -690,13 +739,41 @@ static int wit_signature_get_ctx_params(void *ctx, OSSL_PARAM params[]) {
     }
     return 1;
 }
-static const OSSL_PARAM wit_signature_settable_arr[] = {
+// Phase 8c: per-algorithm settable_ctx_params. ECDSA accepts only
+// "digest"; RSA-PSS accepts the full PSS knob set so openssl's
+// EVP_PKEY_CTX setters can plumb pad-mode / saltlen / mgf1-digest
+// through to the wit signature's set_ctx_params on the Rust side.
+//
+// Each name (ECDSA / RSA-PSS) gets its own dispatch table that
+// differs only in the settable_ctx_params + query_key_types
+// pointers -- everything else is shared with wit_signature_dispatch.
+// Without this split, advertising RSA-PSS params on the ECDSA
+// impl confuses TLS sigalg negotiation ("no suitable signature
+// algorithm" at SSL_accept).
+static const OSSL_PARAM wit_signature_settable_ecdsa_arr[] = {
     OSSL_PARAM_utf8_string("digest", NULL, 0),
     OSSL_PARAM_END,
 };
-static const OSSL_PARAM *wit_signature_settable_ctx_params(void *ctx, void *provctx) {
+static const OSSL_PARAM wit_signature_settable_rsa_pss_arr[] = {
+    OSSL_PARAM_utf8_string("digest",          NULL, 0),
+    OSSL_PARAM_utf8_string("properties",      NULL, 0),
+    OSSL_PARAM_utf8_string("pad-mode",        NULL, 0),
+    OSSL_PARAM_utf8_string("mgf1-digest",     NULL, 0),
+    OSSL_PARAM_utf8_string("mgf1-properties", NULL, 0),
+    OSSL_PARAM_int        ("saltlen",         NULL),
+    OSSL_PARAM_END,
+};
+static const OSSL_PARAM *wit_signature_settable_ctx_params_ecdsa(void *ctx, void *provctx) {
     (void)ctx; (void)provctx;
-    return wit_signature_settable_arr;
+    return wit_signature_settable_ecdsa_arr;
+}
+static const OSSL_PARAM *wit_signature_settable_ctx_params_rsa_pss(void *ctx, void *provctx) {
+    (void)ctx; (void)provctx;
+    return wit_signature_settable_rsa_pss_arr;
+}
+// Back-compat alias for any code still referring to the old name.
+static const OSSL_PARAM *wit_signature_settable_ctx_params(void *ctx, void *provctx) {
+    return wit_signature_settable_ctx_params_ecdsa(ctx, provctx);
 }
 static const OSSL_PARAM wit_signature_gettable_arr[] = {
     OSSL_PARAM_END,
@@ -736,23 +813,44 @@ static const char **wit_signature_query_key_types(void) {
     return g_signature_keytypes;
 }
 
+// Per-signature-impl query_key_types -- ECDSA only signs for "EC",
+// RSA-PSS only for "RSA". Keeps openssl's sigalg matching tight so
+// it doesn't try our RSA-PSS impl with an EC key (or vice versa).
+static const char *g_keytypes_ec[]  = { "EC",  NULL };
+static const char *g_keytypes_rsa[] = { "RSA", NULL };
+static const char **wit_signature_query_key_types_ecdsa(void)   { return g_keytypes_ec; }
+static const char **wit_signature_query_key_types_rsa_pss(void) { return g_keytypes_rsa; }
+
 // ---------------------------------------------------------------------------
 // signature OSSL_DISPATCH table
 // ---------------------------------------------------------------------------
-static const OSSL_DISPATCH wit_signature_dispatch[] = {
-    { OSSL_FUNC_SIGNATURE_NEWCTX,              (void (*)(void))wit_signature_newctx },
-    { OSSL_FUNC_SIGNATURE_FREECTX,             (void (*)(void))wit_signature_freectx },
-    { OSSL_FUNC_SIGNATURE_SIGN_INIT,           (void (*)(void))wit_signature_sign_init },
-    { OSSL_FUNC_SIGNATURE_SIGN,                (void (*)(void))wit_signature_sign },
-    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT,    (void (*)(void))wit_signature_digest_sign_init },
-    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,  (void (*)(void))wit_signature_digest_sign_update },
-    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,   (void (*)(void))wit_signature_digest_sign_final },
-    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN,         (void (*)(void))wit_signature_digest_sign },
-    { OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,      (void (*)(void))wit_signature_set_ctx_params },
-    { OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,      (void (*)(void))wit_signature_get_ctx_params },
-    { OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, (void (*)(void))wit_signature_settable_ctx_params },
-    { OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, (void (*)(void))wit_signature_gettable_ctx_params },
-    { OSSL_FUNC_SIGNATURE_QUERY_KEY_TYPES,     (void (*)(void))wit_signature_query_key_types },
+// Two dispatch tables -- one per registered name (ECDSA / RSA-PSS).
+// All sign/verify/init functions are shared (they route through the
+// WIT signature impl regardless of key type); only settable_ctx_params
+// and query_key_types differ.
+#define WIT_SIG_SHARED_DISPATCH \
+    { OSSL_FUNC_SIGNATURE_NEWCTX,              (void (*)(void))wit_signature_newctx }, \
+    { OSSL_FUNC_SIGNATURE_FREECTX,             (void (*)(void))wit_signature_freectx }, \
+    { OSSL_FUNC_SIGNATURE_SIGN_INIT,           (void (*)(void))wit_signature_sign_init }, \
+    { OSSL_FUNC_SIGNATURE_SIGN,                (void (*)(void))wit_signature_sign }, \
+    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT,    (void (*)(void))wit_signature_digest_sign_init }, \
+    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE,  (void (*)(void))wit_signature_digest_sign_update }, \
+    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL,   (void (*)(void))wit_signature_digest_sign_final }, \
+    { OSSL_FUNC_SIGNATURE_DIGEST_SIGN,         (void (*)(void))wit_signature_digest_sign }, \
+    { OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS,      (void (*)(void))wit_signature_set_ctx_params }, \
+    { OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS,      (void (*)(void))wit_signature_get_ctx_params }, \
+    { OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, (void (*)(void))wit_signature_gettable_ctx_params }
+
+static const OSSL_DISPATCH wit_signature_dispatch_ecdsa[] = {
+    WIT_SIG_SHARED_DISPATCH,
+    { OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, (void (*)(void))wit_signature_settable_ctx_params_ecdsa },
+    { OSSL_FUNC_SIGNATURE_QUERY_KEY_TYPES,     (void (*)(void))wit_signature_query_key_types_ecdsa },
+    { 0, NULL },
+};
+static const OSSL_DISPATCH wit_signature_dispatch_rsa_pss[] = {
+    WIT_SIG_SHARED_DISPATCH,
+    { OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, (void (*)(void))wit_signature_settable_ctx_params_rsa_pss },
+    { OSSL_FUNC_SIGNATURE_QUERY_KEY_TYPES,     (void (*)(void))wit_signature_query_key_types_rsa_pss },
     { 0, NULL },
 };
 
@@ -761,16 +859,31 @@ static const OSSL_DISPATCH wit_signature_dispatch[] = {
 // the persistent OSSL_ALGORITHM[] OpenSSL caches.
 // ===========================================================================
 
-// Static storage for algorithm names (strdup'd from WIT, never freed).
-// Phase 3.5 keeps one algorithm per op; Phase 8 grows.
-static char  g_keymgmt_name[64];
-static char  g_keymgmt_propq[64];
-static char  g_signature_name[64];
-static char  g_signature_propq[64];
-static OSSL_ALGORITHM g_keymgmt_algos[2];      // 1 algo + END sentinel
-static OSSL_ALGORITHM g_signature_algos[2];
+// Static storage for algorithm names. Phase 8c: up to 4 algorithms
+// per op (EC + RSA keymgmts; ECDSA + RSA-PSS signatures); each gets
+// a slot in the names/propq arrays. The dispatch pointer per slot
+// is one of the per-name static dispatches below.
+#define WIT_MAX_ALGOS 4
+static char  g_keymgmt_name[WIT_MAX_ALGOS][64];
+static char  g_keymgmt_propq[WIT_MAX_ALGOS][64];
+static char  g_signature_name[WIT_MAX_ALGOS][64];
+static char  g_signature_propq[WIT_MAX_ALGOS][64];
+static OSSL_ALGORITHM g_keymgmt_algos[WIT_MAX_ALGOS + 1];   // + END sentinel
+static OSSL_ALGORITHM g_signature_algos[WIT_MAX_ALGOS + 1];
 static bool g_keymgmt_built  = false;
 static bool g_signature_built = false;
+
+// Pick the dispatch table matching a WIT-advertised algorithm name.
+// Unknown names fall back to the EC/ECDSA dispatch so we never
+// return NULL (which would crash openssl during fetch).
+static const OSSL_DISPATCH *dispatch_for_keymgmt_name(const char *name) {
+    if (strcmp(name, "RSA") == 0) return wit_keymgmt_dispatch_rsa;
+    return wit_keymgmt_dispatch_ec;
+}
+static const OSSL_DISPATCH *dispatch_for_signature_name(const char *name) {
+    if (strcmp(name, "RSA-PSS") == 0) return wit_signature_dispatch_rsa_pss;
+    return wit_signature_dispatch_ecdsa;
+}
 
 // Strip the colon-separated alias list down to its first name and
 // stash it in `dst`. Truncates safely on too-long input.
@@ -781,6 +894,9 @@ static void strdup_first_alias(char *dst, size_t dst_sz, openssl_string_t *s) {
 }
 
 // Build / cache the keymgmt algorithm table by asking the WIT.
+// Phase 8c registers one OSSL_ALGORITHM per WIT entry (capped at
+// WIT_MAX_ALGOS) with its name-specific dispatch table so openssl
+// can fetch by name (EC -> wit_keymgmt_dispatch_ec, RSA -> _rsa).
 static const OSSL_ALGORITHM *build_keymgmt_algos(void) {
     if (g_keymgmt_built) return g_keymgmt_algos;
     openssl_provider_provider_tuple2_list_ossl_algorithm_bool_t tup = {
@@ -792,18 +908,20 @@ static const OSSL_ALGORITHM *build_keymgmt_algos(void) {
         openssl_provider_provider_list_ossl_algorithm_free(&tup.f0);
         return NULL;
     }
-    // Phase 3.5: take the first algorithm only.
-    openssl_provider_provider_ossl_algorithm_t *a = &tup.f0.ptr[0];
-    strdup_first_alias(g_keymgmt_name,  sizeof(g_keymgmt_name),  &a->algorithm_names);
-    strdup_first_alias(g_keymgmt_propq, sizeof(g_keymgmt_propq), &a->property_definition);
-    g_keymgmt_algos[0].algorithm_names    = g_keymgmt_name;
-    g_keymgmt_algos[0].property_definition = g_keymgmt_propq;
-    g_keymgmt_algos[0].implementation     = wit_keymgmt_dispatch;
-    g_keymgmt_algos[0].algorithm_description = "wit-bridge keymgmt";
-    g_keymgmt_algos[1].algorithm_names    = NULL;
-    g_keymgmt_algos[1].property_definition = NULL;
-    g_keymgmt_algos[1].implementation     = NULL;
-    g_keymgmt_algos[1].algorithm_description = NULL;
+    size_t n = tup.f0.len < WIT_MAX_ALGOS ? tup.f0.len : WIT_MAX_ALGOS;
+    for (size_t i = 0; i < n; i++) {
+        openssl_provider_provider_ossl_algorithm_t *a = &tup.f0.ptr[i];
+        strdup_first_alias(g_keymgmt_name[i],  sizeof(g_keymgmt_name[i]),  &a->algorithm_names);
+        strdup_first_alias(g_keymgmt_propq[i], sizeof(g_keymgmt_propq[i]), &a->property_definition);
+        g_keymgmt_algos[i].algorithm_names    = g_keymgmt_name[i];
+        g_keymgmt_algos[i].property_definition = g_keymgmt_propq[i];
+        g_keymgmt_algos[i].implementation     = dispatch_for_keymgmt_name(g_keymgmt_name[i]);
+        g_keymgmt_algos[i].algorithm_description = "wit-bridge keymgmt";
+    }
+    g_keymgmt_algos[n].algorithm_names    = NULL;
+    g_keymgmt_algos[n].property_definition = NULL;
+    g_keymgmt_algos[n].implementation     = NULL;
+    g_keymgmt_algos[n].algorithm_description = NULL;
     openssl_provider_provider_list_ossl_algorithm_free(&tup.f0);
     g_keymgmt_built = true;
     return g_keymgmt_algos;
@@ -820,17 +938,20 @@ static const OSSL_ALGORITHM *build_signature_algos(void) {
         openssl_provider_provider_list_ossl_algorithm_free(&tup.f0);
         return NULL;
     }
-    openssl_provider_provider_ossl_algorithm_t *a = &tup.f0.ptr[0];
-    strdup_first_alias(g_signature_name,  sizeof(g_signature_name),  &a->algorithm_names);
-    strdup_first_alias(g_signature_propq, sizeof(g_signature_propq), &a->property_definition);
-    g_signature_algos[0].algorithm_names    = g_signature_name;
-    g_signature_algos[0].property_definition = g_signature_propq;
-    g_signature_algos[0].implementation     = wit_signature_dispatch;
-    g_signature_algos[0].algorithm_description = "wit-bridge signature";
-    g_signature_algos[1].algorithm_names    = NULL;
-    g_signature_algos[1].property_definition = NULL;
-    g_signature_algos[1].implementation     = NULL;
-    g_signature_algos[1].algorithm_description = NULL;
+    size_t n = tup.f0.len < WIT_MAX_ALGOS ? tup.f0.len : WIT_MAX_ALGOS;
+    for (size_t i = 0; i < n; i++) {
+        openssl_provider_provider_ossl_algorithm_t *a = &tup.f0.ptr[i];
+        strdup_first_alias(g_signature_name[i],  sizeof(g_signature_name[i]),  &a->algorithm_names);
+        strdup_first_alias(g_signature_propq[i], sizeof(g_signature_propq[i]), &a->property_definition);
+        g_signature_algos[i].algorithm_names    = g_signature_name[i];
+        g_signature_algos[i].property_definition = g_signature_propq[i];
+        g_signature_algos[i].implementation     = dispatch_for_signature_name(g_signature_name[i]);
+        g_signature_algos[i].algorithm_description = "wit-bridge signature";
+    }
+    g_signature_algos[n].algorithm_names    = NULL;
+    g_signature_algos[n].property_definition = NULL;
+    g_signature_algos[n].implementation     = NULL;
+    g_signature_algos[n].algorithm_description = NULL;
     openssl_provider_provider_list_ossl_algorithm_free(&tup.f0);
     g_signature_built = true;
     return g_signature_algos;

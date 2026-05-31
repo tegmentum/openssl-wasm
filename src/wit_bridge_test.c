@@ -286,3 +286,82 @@ done:
     if (prov) OSSL_PROVIDER_unload(prov);
     return ok;
 }
+
+// ---------------------------------------------------------------------------
+// digest-sign-via-evp-with-wit-bridge: EVP_DigestSign path (the path
+// TLS actually uses). Phase 8a diagnostic for the open question from
+// Phase 5.4. The EVP_PKEY_sign + manual-prehash variant above works;
+// this variant should ALSO work after Phase 8a's expanded
+// settable_ctx_params, since ctrl_params_translate.c was the
+// suspected blocker.
+// ---------------------------------------------------------------------------
+bool exports_openssl_component_wit_bridge_test_digest_sign_via_evp_with_wit_bridge(
+        openssl_string_t *uri,
+        openssl_string_t *mdname,
+        openssl_list_u8_t *tbs,
+        openssl_list_u8_t *ret,
+        openssl_string_t *err) {
+
+    bool ok = false;
+    OSSL_PROVIDER *def  = NULL;
+    OSSL_PROVIDER *prov = NULL;
+    EVP_PKEY_CTX  *pctx = NULL;
+    EVP_PKEY      *pkey = NULL;
+    EVP_MD_CTX    *mdctx = NULL;
+    unsigned char *sig = NULL;
+    char *uri_c = NULL, *md_c = NULL;
+
+    uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+    md_c  = xmalloc(mdname->len + 1);
+    memcpy(md_c, mdname->ptr, mdname->len); md_c[mdname->len] = 0;
+
+    def = OSSL_PROVIDER_load(NULL, "default");
+    if (!def) { evp_err(err, "OSSL_PROVIDER_load(default)"); goto done; }
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!prov) { evp_err(err, "OSSL_PROVIDER_load(wit-bridge)"); goto done; }
+
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=wit-bridge");
+    if (!pctx) { evp_err(err, "EVP_PKEY_CTX_new_from_name"); goto done; }
+    if (EVP_PKEY_fromdata_init(pctx) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata_init"); goto done;
+    }
+    OSSL_PARAM fd_params[] = {
+        OSSL_PARAM_utf8_string("wit-bridge-uri", uri_c, uri->len),
+        OSSL_PARAM_END,
+    };
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, fd_params) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata"); goto done;
+    }
+
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx) { openssl_string_dup(err, "EVP_MD_CTX_new"); goto done; }
+    if (!EVP_DigestSignInit_ex(mdctx, NULL, md_c, NULL,
+                               "?provider=wit-bridge", pkey, NULL)) {
+        evp_err(err, "EVP_DigestSignInit_ex"); goto done;
+    }
+
+    size_t siglen = 0;
+    if (!EVP_DigestSign(mdctx, NULL, &siglen, tbs->ptr, tbs->len)) {
+        evp_err(err, "EVP_DigestSign sizing"); goto done;
+    }
+    sig = xmalloc(siglen);
+    if (!EVP_DigestSign(mdctx, sig, &siglen, tbs->ptr, tbs->len)) {
+        evp_err(err, "EVP_DigestSign final"); goto done;
+    }
+
+    ret->ptr = sig; ret->len = siglen;
+    sig = NULL;
+    ok = true;
+
+done:
+    free(sig);
+    free(uri_c);
+    free(md_c);
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_CTX_free(pctx);
+    EVP_PKEY_free(pkey);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    return ok;
+}
