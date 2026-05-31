@@ -180,6 +180,15 @@ interface pkey {
         from-wit-bridge-uri: static func(uri: string)
             -> result<pkey, pkey-error>;
 
+        /// Phase 8: load a key via OSSL_STORE_open(uri). Works with
+        /// any provider that claims the URI's scheme through
+        /// openssl:store/store.supported-schemes(). The composed
+        /// stack typically routes pkcs11: URIs to pkcs11-store-adapter
+        /// + pkcs11-bridge. Returns the first key emitted by the
+        /// store loader (cert/CRL objects are skipped).
+        from-uri: static func(uri: string)
+            -> result<pkey, pkey-error>;
+
         /// Key metadata.
         kind: func() -> key-type;
         bits: func() -> u32;

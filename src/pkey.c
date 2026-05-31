@@ -15,6 +15,7 @@
 #include <openssl/pem.h>
 #include <openssl/provider.h>
 #include <openssl/rsa.h>
+#include <openssl/store.h>
 
 #define PE_UNSUPPORTED_TYPE  EXPORTS_OPENSSL_COMPONENT_PKEY_PKEY_ERROR_UNSUPPORTED_TYPE
 #define PE_BAD_ENCODING      EXPORTS_OPENSSL_COMPONENT_PKEY_PKEY_ERROR_BAD_ENCODING
@@ -884,4 +885,75 @@ exports_openssl_component_pkey_method_pkey_clone(
 void exports_openssl_component_pkey_pkey_destructor(
         exports_openssl_component_pkey_pkey_t *rep) {
     if (rep) EVP_PKEY_free(as_pkey_rep(rep));
+}
+
+// ===========================================================================
+// Phase 8 — pkey.from-uri via OSSL_STORE.
+//
+// Opens an OSSL_STORE_CTX against `uri`, walks objects, returns the
+// first EVP_PKEY (extracted or referenced) the loader emits. Skips
+// cert / CRL / name objects. Composed stacks satisfy the underlying
+// store interface via openssl:store/store (Layer-2 backends like
+// pkcs11-store-adapter map pkcs11: URIs to find-objects walks).
+// ===========================================================================
+bool exports_openssl_component_pkey_static_pkey_from_uri(
+        openssl_string_t *uri,
+        exports_openssl_component_pkey_own_pkey_t *ret,
+        exports_openssl_component_pkey_pkey_error_t *err) {
+    OSSL_PROVIDER *def  = NULL;
+    OSSL_PROVIDER *prov = NULL;
+    OSSL_STORE_CTX *sctx = NULL;
+    EVP_PKEY *out = NULL;
+    char *uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+
+    def  = OSSL_PROVIDER_load(NULL, "default");
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!def || !prov) {
+        err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error();
+        goto fail;
+    }
+
+    sctx = OSSL_STORE_open(uri_c, NULL, NULL, NULL, NULL);
+    if (!sctx) {
+        err->tag = PE_INTERNAL;
+        err->val.internal = ERR_peek_last_error();
+        goto fail;
+    }
+
+    while (!OSSL_STORE_eof(sctx) && out == NULL) {
+        OSSL_STORE_INFO *info = OSSL_STORE_load(sctx);
+        if (!info) {
+            if (OSSL_STORE_error(sctx)) break;
+            continue;
+        }
+        int type = OSSL_STORE_INFO_get_type(info);
+        if (type == OSSL_STORE_INFO_PKEY) {
+            out = OSSL_STORE_INFO_get1_PKEY(info);
+        } else if (type == OSSL_STORE_INFO_PUBKEY) {
+            out = OSSL_STORE_INFO_get1_PUBKEY(info);
+        }
+        OSSL_STORE_INFO_free(info);
+    }
+
+    if (!out) {
+        err->tag = PE_INTERNAL;
+        err->val.internal = ERR_peek_last_error();
+        goto fail;
+    }
+
+    *ret = handle_of(out);
+    OSSL_STORE_close(sctx);
+    OSSL_PROVIDER_unload(prov);
+    OSSL_PROVIDER_unload(def);
+    free(uri_c);
+    return true;
+
+fail:
+    if (sctx) OSSL_STORE_close(sctx);
+    if (out)  EVP_PKEY_free(out);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    free(uri_c);
+    return false;
 }

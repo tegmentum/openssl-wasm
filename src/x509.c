@@ -20,7 +20,9 @@
 #include <openssl/pem.h>         /* must precede cms.h for PEM_*_CMS_* */
 #include <openssl/cms.h>
 #include <openssl/pkcs12.h>
+#include <openssl/provider.h>
 #include <openssl/stack.h>
+#include <openssl/store.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
@@ -203,6 +205,77 @@ bool exports_openssl_component_x509_static_certificate_parse_chain(
     ret->ptr = arr;
     ret->len = n;
     return true;
+}
+
+// Phase 8 — certificate.parse-uri via OSSL_STORE.
+// Drains every X.509 the loader emits in order; keys / CRLs / names
+// are skipped. Mirrors pkey.from-uri in pkey.c.
+bool exports_openssl_component_x509_static_certificate_parse_uri(
+        openssl_string_t *uri,
+        exports_openssl_component_x509_list_own_certificate_t *ret,
+        exports_openssl_component_x509_x509_error_t *err) {
+    OSSL_PROVIDER *def  = NULL;
+    OSSL_PROVIDER *prov = NULL;
+    OSSL_STORE_CTX *sctx = NULL;
+    size_t cap = 4, n = 0;
+    exports_openssl_component_x509_own_certificate_t *arr =
+        xmalloc(cap * sizeof(*arr));
+    char *uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+
+    def  = OSSL_PROVIDER_load(NULL, "default");
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!def || !prov) {
+        err->tag = XE_INTERNAL; err->val.internal = ERR_peek_last_error();
+        goto fail;
+    }
+
+    sctx = OSSL_STORE_open(uri_c, NULL, NULL, NULL, NULL);
+    if (!sctx) {
+        err->tag = XE_INTERNAL; err->val.internal = ERR_peek_last_error();
+        goto fail;
+    }
+
+    while (!OSSL_STORE_eof(sctx)) {
+        OSSL_STORE_INFO *info = OSSL_STORE_load(sctx);
+        if (!info) {
+            if (OSSL_STORE_error(sctx)) break;
+            continue;
+        }
+        if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_CERT) {
+            X509 *c = OSSL_STORE_INFO_get1_CERT(info);
+            if (c) {
+                if (n == cap) { cap *= 2; arr = realloc(arr, cap * sizeof(*arr)); }
+                arr[n++] = cert_handle(c);
+            }
+        }
+        OSSL_STORE_INFO_free(info);
+    }
+
+    OSSL_STORE_close(sctx);
+    OSSL_PROVIDER_unload(prov);
+    OSSL_PROVIDER_unload(def);
+    free(uri_c);
+
+    if (n == 0) {
+        free(arr);
+        err->tag = XE_PARSE; err->val.internal = 0;
+        return false;
+    }
+    ret->ptr = arr; ret->len = n;
+    return true;
+
+fail:
+    if (sctx) OSSL_STORE_close(sctx);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    for (size_t i = 0; i < n; i++) {
+        // cert_handle owns X509_up_ref; releasing the handle drops it.
+        exports_openssl_component_x509_certificate_drop_own(arr[i]);
+    }
+    free(arr);
+    free(uri_c);
+    return false;
 }
 
 bool exports_openssl_component_x509_method_certificate_encode(

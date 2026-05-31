@@ -108,6 +108,13 @@ interface x509 {
         parse-chain: static func(pem: list<u8>)
             -> result<list<certificate>, x509-error>;
 
+        /// Phase 8: load certs via OSSL_STORE_open(uri). Returns
+        /// every X.509 the loader emits in order (leaf first, then
+        /// any chain certs the backend produced). Keys / CRLs in
+        /// the stream are skipped. Use `pkey.from-uri` for keys.
+        parse-uri: static func(uri: string)
+            -> result<list<certificate>, x509-error>;
+
         encode: func(enc: encoding) -> result<list<u8>, x509-error>;
 
         info: func() -> certificate-info;
