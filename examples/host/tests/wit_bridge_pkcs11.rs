@@ -356,3 +356,100 @@ async fn wit_bridge_signs_rsa_pss_via_softhsm() -> Result<()> {
     drop((cfg_dir, data_dir));
     Ok(())
 }
+
+/// Phase 8 STORE: prove OSSL_STORE_open('pkcs11:...') dispatches all
+/// the way through openssl-wasm's wit_store_dispatch -> pkcs11-store-
+/// adapter -> pkcs11:host -> SoftHSM, and bytes (or at least a key)
+/// come back.
+///
+/// CURRENT STATE: this test FAILS because wac plug doesn't dedup
+/// pkcs11:host instances — pkcs11-bridge and pkcs11-store-adapter
+/// each get their OWN pkcs11-provider connection (different SoftHSM
+/// token databases). Bridge provisions a key in instance A; store
+/// adapter looks in instance B and finds nothing.
+///
+/// FIX: use `wac compose` with an explicit manifest that shares
+/// pkcs11-provider between adapter and bridge. The test will pass
+/// without modification once that lands.
+///
+/// Until then this test is #[ignore]'d so CI stays green. Run with
+/// `--ignored` to confirm the issue is still there (find_objects
+/// returns 0 handles -> has_key=false assert trips).
+#[tokio::test]
+#[ignore = "blocked on wac compose pkcs11:host dedup — see test doc"]
+async fn wit_bridge_load_uri_through_store() -> Result<()> {
+    let comp_path = std::env::var("OPENSSL_WASM_COMPONENT")
+        .map_err(|_| anyhow!("set OPENSSL_WASM_COMPONENT"))?;
+    let comp_path = PathBuf::from(comp_path);
+    if !Path::new(&comp_path).exists() {
+        return Err(anyhow!("component not found: {}", comp_path.display()));
+    }
+    let (cfg_dir, data_dir) = stage_softhsm_dirs()?;
+
+    let mut engine_cfg = Config::new();
+    engine_cfg.wasm_component_model(true);
+    engine_cfg.async_support(true);
+    let engine = Engine::new(&engine_cfg)?;
+    let component = Component::from_file(&engine, &comp_path)?;
+
+    let guest_stderr = MemoryOutputPipe::new(4 << 20);
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.inherit_stdin().inherit_stdout().stderr(guest_stderr.clone())
+        .env("SOFTHSM2_CONF", "/config/softhsm2-wasi.conf")
+        .preopened_dir(&cfg_dir,  "/config", DirPerms::READ, FilePerms::READ)?
+        .preopened_dir(&data_dir, "/data",   DirPerms::all(), FilePerms::all())?;
+    let state = State { table: ResourceTable::new(), ctx: wasi.build() };
+
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+    pkcs11::util::util::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
+        &mut linker, |s| s)?;
+    let mut store_wasm = Store::new(&engine, state);
+    let bindings = Phase5Pkcs11::instantiate_async(&mut store_wasm, &component, &linker).await?;
+
+    // First: provision a key in the token via the existing init=true path
+    // (call sign-with-wit-bridge, which creates the key and signs once).
+    let provision_uri = "pkcs11:slot-id=0;object=phase-8-store-key;pin-value=1234;\
+                         init=true;algorithm=ecdsa-p256".to_string();
+    let mdname = "SHA2-256".to_string();
+    let tbs    = b"phase-8 STORE chain provisioning".to_vec();
+    let _ = bindings.openssl_component_wit_bridge_test()
+        .call_sign_with_wit_bridge(&mut store_wasm, &provision_uri, &mdname, &tbs).await?
+        .map_err(|e| anyhow!("provisioning sign failed: {e}"))?;
+
+    // Now drive the STORE loader against the same URI -- pkcs11-store-adapter
+    // walks pkcs11:host objects, emits the private key as a key-reference,
+    // OpenSSL re-enters keymgmt.load which materializes the EVP_PKEY.
+    // Note: no type= filter; pkcs11-store-adapter walks all matching
+    // objects, classes get differentiated by CKA_CLASS read per-object.
+    let load_uri = "pkcs11:slot-id=0;object=phase-8-store-key;pin-value=1234".to_string();
+    let res = bindings.openssl_component_wit_bridge_test()
+        .call_load_uri_test(&mut store_wasm, &load_uri).await?
+        .map_err(|e| {
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("--- guest stderr ---\n{}", String::from_utf8_lossy(&logs));
+            }
+            anyhow!("load-uri-test inner err: {e}")
+        })?;
+
+    println!("STORE results: cert_count={} has_key={} key_bits={}",
+             res.cert_count, res.has_key, res.key_bits);
+    let logs = guest_stderr.contents();
+    if !logs.is_empty() {
+        eprintln!("--- guest stderr ---\n{}", String::from_utf8_lossy(&logs));
+    }
+    assert!(res.has_key, "store loader should surface the auto-provisioned key");
+    assert_eq!(res.key_bits, 256, "P-256 -> 256 bits");
+    // cert_count == 0 expected: the token only has a key (no cert
+    // auto-provisioning yet — see plans/openssl-provider-wit.md Phase 8
+    // follow-up to extend init=true with a self-signed cert).
+    assert_eq!(res.cert_count, 0, "no cert auto-provisioned (expected for now)");
+    println!("\nPHASE 8 STORE -- the whole chain works: openssl-wasm \
+              OSSL_STORE_open -> wit_store_dispatch -> pkcs11-store-adapter \
+              -> pkcs11:host find_objects -> SoftHSM -> CKO_PRIVATE_KEY \
+              surfaced as a key-reference -> keymgmt.load materialized \
+              the EVP_PKEY ({} bits).", res.key_bits);
+    drop((cfg_dir, data_dir));
+    Ok(())
+}

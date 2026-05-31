@@ -30,6 +30,7 @@
 #include <openssl/err.h>
 #include <openssl/params.h>
 #include <openssl/provider.h>
+#include <openssl/store.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -363,5 +364,86 @@ done:
     EVP_PKEY_free(pkey);
     if (prov) OSSL_PROVIDER_unload(prov);
     if (def)  OSSL_PROVIDER_unload(def);
+    return ok;
+}
+
+// ===========================================================================
+// Phase 8: exercise OSSL_STORE through the wit-bridge chain end-to-end.
+// Mirrors the path SSLContext.load_uri() takes from Python, but
+// avoids needing a Python harness — the existing wit_bridge_test
+// wasmtime tests already provide the pkcs11:util/util host stub.
+// ===========================================================================
+bool exports_openssl_component_wit_bridge_test_load_uri_test(
+        openssl_string_t *uri,
+        exports_openssl_component_wit_bridge_test_store_load_result_t *ret,
+        openssl_string_t *err) {
+    OSSL_PROVIDER *def = NULL, *prov = NULL;
+    OSSL_STORE_CTX *sctx = NULL;
+    bool ok = false;
+    ret->cert_count = 0;
+    ret->has_key    = false;
+    ret->key_bits   = 0;
+
+    char *uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+
+    def  = OSSL_PROVIDER_load(NULL, "default");
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!def || !prov) {
+        const char *m = "OSSL_PROVIDER_load failed (default/wit-bridge)";
+        err->ptr = (uint8_t *)xmalloc(strlen(m) + 1);
+        memcpy(err->ptr, m, strlen(m));
+        err->len = strlen(m);
+        goto done;
+    }
+
+    sctx = OSSL_STORE_open(uri_c, NULL, NULL, NULL, NULL);
+    if (!sctx) {
+        const char *m = "OSSL_STORE_open failed (scheme not claimed by any provider?)";
+        err->ptr = (uint8_t *)xmalloc(strlen(m) + 1);
+        memcpy(err->ptr, m, strlen(m));
+        err->len = strlen(m);
+        goto done;
+    }
+
+    while (!OSSL_STORE_eof(sctx)) {
+        OSSL_STORE_INFO *info = OSSL_STORE_load(sctx);
+        if (!info) {
+            if (OSSL_STORE_error(sctx)) break;
+            continue;
+        }
+        switch (OSSL_STORE_INFO_get_type(info)) {
+        case OSSL_STORE_INFO_CERT:
+            ret->cert_count++;
+            break;
+        case OSSL_STORE_INFO_PKEY: {
+            EVP_PKEY *k = OSSL_STORE_INFO_get1_PKEY(info);
+            if (k && !ret->has_key) {
+                ret->has_key  = true;
+                ret->key_bits = (uint32_t)EVP_PKEY_get_bits(k);
+            }
+            EVP_PKEY_free(k);
+            break;
+        }
+        case OSSL_STORE_INFO_PUBKEY: {
+            EVP_PKEY *k = OSSL_STORE_INFO_get1_PUBKEY(info);
+            if (k && !ret->has_key) {
+                ret->has_key  = true;
+                ret->key_bits = (uint32_t)EVP_PKEY_get_bits(k);
+            }
+            EVP_PKEY_free(k);
+            break;
+        }
+        default: break;
+        }
+        OSSL_STORE_INFO_free(info);
+    }
+    ok = true;
+
+done:
+    if (sctx) OSSL_STORE_close(sctx);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    free(uri_c);
     return ok;
 }

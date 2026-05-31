@@ -39,4 +39,19 @@ interface wit-bridge-test {
     mdname: string,
     tbs: list<u8>,
   ) -> result<list<u8>, string>;
+
+  /// Phase 8 STORE round-trip. Calls OSSL_STORE_open(uri), drains
+  /// objects, returns counts. Validates the entire chain:
+  /// openssl-wasm STORE dispatch -> pkcs11-store-adapter URI parse
+  /// -> pkcs11:host find_objects walk -> bytes coming back.
+  ///
+  /// String error if OSSL_STORE_open itself fails (so the Rust test
+  /// can distinguish "scheme not claimed" from "scheme claimed but
+  /// token empty / no matching objects").
+  record store-load-result {
+    cert-count: u32,
+    has-key:    bool,
+    key-bits:   u32,
+  }
+  load-uri-test: func(uri: string) -> result<store-load-result, string>;
 }
