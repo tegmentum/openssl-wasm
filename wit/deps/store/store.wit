@@ -58,7 +58,6 @@ package openssl:store@0.1.0;
 
 interface store {
   use openssl:pkey/pkey@0.1.0.{ossl-param, ossl-param-descriptor, pkey-error};
-  use openssl:keymgmt/keymgmt@0.1.0.{keydata};
 
   // -------------------------------------------------------------------
   // Object kind discriminator
@@ -76,10 +75,15 @@ interface store {
     /// X.509 CRL as DER. The caller decodes with d2i_X509_CRL.
     crl(list<u8>),
 
-    /// Public or private key. The resource handle survives across
-    /// load() calls so the caller can wrap it in an EVP_PKEY and
-    /// pass it to a signer/verifier/asym-cipher context.
-    key(keydata),
+    /// Opaque reference + key-kind. The reference bytes are the
+    /// same blob the matching keymgmt.load consumes — typically
+    /// the original URI but the backend is free to pick any
+    /// stable encoding. C-side: this becomes OpenSSL's
+    /// OSSL_OBJECT_PARAM_REFERENCE + OSSL_OBJECT_PARAM_DATA_TYPE
+    /// in the STORE_LOAD callback, and OpenSSL passes the
+    /// reference straight back to keymgmt.load to materialize the
+    /// key. Decouples STORE from keydata's resource lifetime.
+    key-reference(tuple<string, list<u8>>),  // (data-type, reference)
 
     /// URI-only result: the loader matched the search but only has
     /// a name/alias, not the object bytes. The caller can re-issue
