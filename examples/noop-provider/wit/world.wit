@@ -18,4 +18,10 @@ world noop {
   // resource is still implemented (no-op) so wac plug can satisfy
   // openssl-wasm's import.
   export openssl:store/store@0.1.0;
+  // Phase 8: ENCODER + DECODER. noop reports no algorithms via
+  // provider.query-operation(encoder/decoder), but the resource
+  // ctors are still implemented (no-op) so wac plug can satisfy
+  // openssl-wasm's imports.
+  export openssl:encoder/encoder@0.1.0;
+  export openssl:decoder/decoder@0.1.0;
 }

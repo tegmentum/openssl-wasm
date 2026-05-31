@@ -43,4 +43,6 @@ world openssl {
     import openssl:signature/signature@0.1.0;
     import openssl:asym-cipher/asym-cipher@0.1.0;
     import openssl:store/store@0.1.0;
+    import openssl:encoder/encoder@0.1.0;
+    import openssl:decoder/decoder@0.1.0;
 }

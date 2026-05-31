@@ -524,3 +524,135 @@ bool exports_openssl_store_store_method_loader_eof(
         exports_openssl_store_store_borrow_loader_t self) {
     (void)self; return true;
 }
+
+// =========================================================================
+// ENCODER (Phase 8) — no-op. provider.query-operation(encoder) returns
+// no algorithms, so the resource methods below are unreachable in
+// practice; we still implement them so wac plug can satisfy
+// openssl-wasm's import.
+// =========================================================================
+
+void exports_openssl_encoder_encoder_gettable_params(
+        exports_openssl_encoder_encoder_list_ossl_param_descriptor_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+void exports_openssl_encoder_encoder_settable_ctx_params(
+        exports_openssl_encoder_encoder_list_ossl_param_descriptor_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+bool exports_openssl_encoder_encoder_does_selection(
+        exports_openssl_encoder_encoder_key_selection_t selection) {
+    (void)selection; return false;
+}
+
+typedef struct { uint8_t marker; } noop_encode_ctx_rep_t;
+static noop_encode_ctx_rep_t g_noop_encode_ctx = { 0xEE };
+
+exports_openssl_encoder_encoder_own_encode_ctx_t
+exports_openssl_encoder_encoder_constructor_encode_ctx(void) {
+    return exports_openssl_encoder_encoder_encode_ctx_new(
+        (exports_openssl_encoder_encoder_encode_ctx_t *)&g_noop_encode_ctx);
+}
+
+void exports_openssl_encoder_encoder_encode_ctx_destructor(
+        exports_openssl_encoder_encoder_encode_ctx_t *rep) { (void)rep; }
+
+bool exports_openssl_encoder_encoder_method_encode_ctx_get_params(
+        exports_openssl_encoder_encoder_borrow_encode_ctx_t self,
+        exports_openssl_encoder_encoder_list_ossl_param_t *ret,
+        exports_openssl_encoder_encoder_pkey_error_t *err) {
+    (void)self; (void)err; ret->ptr = NULL; ret->len = 0; return true;
+}
+
+bool exports_openssl_encoder_encoder_method_encode_ctx_set_ctx_params(
+        exports_openssl_encoder_encoder_borrow_encode_ctx_t self,
+        exports_openssl_encoder_encoder_list_ossl_param_t *params,
+        exports_openssl_encoder_encoder_pkey_error_t *err) {
+    (void)self; (void)params; (void)err; return true;
+}
+
+bool exports_openssl_encoder_encoder_method_encode_ctx_import_object(
+        exports_openssl_encoder_encoder_borrow_encode_ctx_t self,
+        exports_openssl_encoder_encoder_key_selection_t selection,
+        exports_openssl_encoder_encoder_list_ossl_param_t *params,
+        exports_openssl_encoder_encoder_own_keydata_t *ret,
+        exports_openssl_encoder_encoder_pkey_error_t *err) {
+    (void)self; (void)selection; (void)params; (void)ret;
+    ERR_NS(err); return false;
+}
+
+bool exports_openssl_encoder_encoder_method_encode_ctx_encode(
+        exports_openssl_encoder_encoder_borrow_encode_ctx_t self,
+        exports_openssl_encoder_encoder_borrow_keydata_t obj,
+        exports_openssl_encoder_encoder_key_selection_t selection,
+        noop_list_u8_t *ret,
+        exports_openssl_encoder_encoder_pkey_error_t *err) {
+    (void)self; (void)obj; (void)selection; (void)ret;
+    ERR_NS(err); return false;
+}
+
+// =========================================================================
+// DECODER (Phase 8) — symmetric no-op.
+// =========================================================================
+
+void exports_openssl_decoder_decoder_gettable_params(
+        exports_openssl_decoder_decoder_list_ossl_param_descriptor_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+void exports_openssl_decoder_decoder_settable_ctx_params(
+        exports_openssl_decoder_decoder_list_ossl_param_descriptor_t *ret) {
+    ret->ptr = NULL; ret->len = 0;
+}
+
+bool exports_openssl_decoder_decoder_does_selection(
+        exports_openssl_decoder_decoder_key_selection_t selection) {
+    (void)selection; return false;
+}
+
+typedef struct { uint8_t marker; } noop_decode_ctx_rep_t;
+static noop_decode_ctx_rep_t g_noop_decode_ctx = { 0xDD };
+
+exports_openssl_decoder_decoder_own_decode_ctx_t
+exports_openssl_decoder_decoder_constructor_decode_ctx(void) {
+    return exports_openssl_decoder_decoder_decode_ctx_new(
+        (exports_openssl_decoder_decoder_decode_ctx_t *)&g_noop_decode_ctx);
+}
+
+void exports_openssl_decoder_decoder_decode_ctx_destructor(
+        exports_openssl_decoder_decoder_decode_ctx_t *rep) { (void)rep; }
+
+bool exports_openssl_decoder_decoder_method_decode_ctx_get_params(
+        exports_openssl_decoder_decoder_borrow_decode_ctx_t self,
+        exports_openssl_decoder_decoder_list_ossl_param_t *ret,
+        exports_openssl_decoder_decoder_pkey_error_t *err) {
+    (void)self; (void)err; ret->ptr = NULL; ret->len = 0; return true;
+}
+
+bool exports_openssl_decoder_decoder_method_decode_ctx_set_ctx_params(
+        exports_openssl_decoder_decoder_borrow_decode_ctx_t self,
+        exports_openssl_decoder_decoder_list_ossl_param_t *params,
+        exports_openssl_decoder_decoder_pkey_error_t *err) {
+    (void)self; (void)params; (void)err; return true;
+}
+
+bool exports_openssl_decoder_decoder_method_decode_ctx_decode(
+        exports_openssl_decoder_decoder_borrow_decode_ctx_t self,
+        noop_list_u8_t *input,
+        exports_openssl_decoder_decoder_key_selection_t selection,
+        exports_openssl_decoder_decoder_list_decoded_object_t *ret,
+        exports_openssl_decoder_decoder_pkey_error_t *err) {
+    (void)self; (void)input; (void)selection; (void)err;
+    ret->ptr = NULL; ret->len = 0; return true;
+}
+
+bool exports_openssl_decoder_decoder_method_decode_ctx_export_object(
+        exports_openssl_decoder_decoder_borrow_decode_ctx_t self,
+        exports_openssl_decoder_decoder_borrow_keydata_t obj,
+        exports_openssl_decoder_decoder_list_ossl_param_t *ret,
+        exports_openssl_decoder_decoder_pkey_error_t *err) {
+    (void)self; (void)obj; (void)ret;
+    ERR_NS(err); return false;
+}

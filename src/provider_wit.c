@@ -902,6 +902,13 @@ static void strdup_first_alias(char *dst, size_t dst_sz, openssl_string_t *s) {
 // supported-schemes() and emits one OSSL_ALGORITHM per scheme.
 extern const OSSL_ALGORITHM *build_store_algos(void);
 
+// Implemented in src/encoder_wit.c / src/decoder_wit.c; query
+// provider.query-operation(operation::encoder/decoder) for the
+// list of (algorithm-names, property-definition) pairs the
+// composed-in Layer-2 provider supports.
+extern const OSSL_ALGORITHM *build_encoder_algos(void);
+extern const OSSL_ALGORITHM *build_decoder_algos(void);
+
 static const OSSL_ALGORITHM *build_keymgmt_algos(void) {
     if (g_keymgmt_built) return g_keymgmt_algos;
     openssl_provider_provider_tuple2_list_ossl_algorithm_bool_t tup = {
@@ -1003,6 +1010,8 @@ static const OSSL_ALGORITHM *wit_provider_query_operation(
         case OSSL_OP_KEYMGMT:   return build_keymgmt_algos();
         case OSSL_OP_SIGNATURE: return build_signature_algos();
         case OSSL_OP_STORE:     return build_store_algos();
+        case OSSL_OP_ENCODER:   return build_encoder_algos();
+        case OSSL_OP_DECODER:   return build_decoder_algos();
         default:                return NULL;
     }
 }
