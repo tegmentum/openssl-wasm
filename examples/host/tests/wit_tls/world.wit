@@ -1,0 +1,10 @@
+package compose:phase5-tls@0.1.0;
+
+world phase5-tls {
+    import pkcs11:util/util;
+    export openssl:component/digest@0.1.0;
+    export openssl:component/pkey@0.1.0;
+    export openssl:component/x509@0.1.0;
+    export openssl:component/tls@0.1.0;
+    export openssl:component/error@0.1.0;
+}

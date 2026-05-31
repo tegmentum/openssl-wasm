@@ -1,0 +1,323 @@
+package openssl:component@0.1.0;
+
+// TLS client and server.
+//
+// The underlying BSD socket work is done inside the component (OpenSSL
+// calls `connect`/`accept`/`read`/`write`, wasi-libc shims forward those
+// to `wasi:sockets`). The host is responsible for granting network
+// access via wasmtime-wasi.
+
+interface tls {
+    use error.{code};
+    use pkey.{pkey};
+    use x509.{certificate, store, verify-options};
+
+    /// See note in digest.wit: trailing digit-only segments (e.g.
+    /// `tls1-2`) fail wac's kebab-case check. Use single-word aliases.
+    enum protocol {
+        tls12,
+        tls13,
+        dtls12,
+    }
+
+    record protocol-range {
+        min: protocol,
+        max: protocol,
+    }
+
+    enum verify-mode {
+        /// Do not verify peer cert. Insecure; for development only.
+        none,
+        /// Verify and fail if invalid.
+        required,
+        /// Clients: required. Servers: request client cert, fail if given
+        /// and invalid (mTLS).
+        optional,
+    }
+
+    /// TLS 1.3 cipher suites and TLS 1.2 cipher list names. Free-form to
+    /// allow the caller to pass OpenSSL cipher strings verbatim.
+    record cipher-preferences {
+        /// e.g. "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+        tls13: option<string>,
+        /// e.g. "HIGH:!aNULL:!MD5"
+        tls12: option<string>,
+    }
+
+    record alpn-offer {
+        protocols: list<string>,
+    }
+
+    enum session-ticket-policy {
+        disabled,
+        stateless,
+        stateful,
+    }
+
+    variant tls-error {
+        bad-config,
+        handshake-failed,
+        verify-failed(verify-failure),
+        alpn-mismatch,
+        sni-mismatch,
+        hostname-mismatch,
+        protocol-version,
+        io-closed,
+        would-block,
+        internal(code),
+    }
+
+    record verify-failure {
+        /// X.509 error code (matches OpenSSL's X509_V_ERR_*).
+        code: u32,
+        message: string,
+        /// Depth in the chain at which the failure occurred (0 = leaf).
+        depth: u32,
+    }
+
+    record client-config {
+        protocols: protocol-range,
+        verify: verify-mode,
+        trust: option<store>,
+        verify-options: option<verify-options>,
+        /// SNI hostname to send and verify against.
+        server-name: option<string>,
+        /// Client certificate for mTLS.
+        client-cert: option<certificate>,
+        client-key: option<pkey>,
+        alpn: option<alpn-offer>,
+        ciphers: option<cipher-preferences>,
+        /// Advertised key-exchange groups in preference order, passed
+        /// verbatim to `SSL_CTX_set1_groups_list`. Accepts EC curves
+        /// (`P-256`, `X25519`, …), TLS 1.3 FFDHE groups (`ffdhe2048`
+        /// through `ffdhe8192` per RFC 7919), and hybrid PQ groups
+        /// (`X25519MLKEM768`, …). Example: "X25519:ffdhe2048:P-256".
+        groups: option<string>,
+        /// Enable 0-RTT on TLS 1.3. Requires a resumable session.
+        enable-early-data: bool,
+        /// Resumption ticket previously returned by `client.session-ticket`.
+        resume-session: option<list<u8>>,
+        /// Enable NSS-format SECRET_LOG capture. Drain via `client.drain-keylog`.
+        keylog: bool,
+    }
+
+    record server-config {
+        protocols: protocol-range,
+        verify: verify-mode,
+        /// Client-auth trust store (mTLS). Required if verify != none.
+        client-trust: option<store>,
+        /// Server certificate chain: leaf first, then intermediates.
+        cert-chain: list<certificate>,
+        /// Server private key corresponding to cert-chain[0].
+        key: pkey,
+        /// Optional SNI → (cert-chain, key) overrides keyed by hostname.
+        sni-hosts: list<sni-binding>,
+        alpn: option<alpn-offer>,
+        ciphers: option<cipher-preferences>,
+        groups: option<string>,
+        session-tickets: session-ticket-policy,
+        /// Enable NSS-format SECRET_LOG capture. Drain via `server.drain-keylog`.
+        keylog: bool,
+    }
+
+    record sni-binding {
+        hostname: string,
+        cert-chain: list<certificate>,
+        key: pkey,
+    }
+
+    record peer-info {
+        /// Negotiated protocol version.
+        protocol: protocol,
+        /// Cipher suite name (e.g. "TLS_AES_256_GCM_SHA384").
+        cipher-suite: string,
+        /// Negotiated ALPN protocol, if any.
+        alpn: option<string>,
+        /// SNI server-name the peer sent, if any (servers only).
+        sni: option<string>,
+        /// Peer certificate chain.
+        peer-chain: list<certificate>,
+        /// Whether the current session was resumed.
+        resumed: bool,
+        /// Negotiated group (curve / hybrid KEM).
+        group: option<string>,
+    }
+
+    /// A connected TLS endpoint. Reads and writes are blocking at the WIT
+    /// level — the component coordinates with wasi:sockets internally.
+    resource client {
+        /// Open a TCP connection to `host:port` and perform the TLS
+        /// handshake. `host` is used both for DNS and SNI unless the
+        /// config overrides SNI explicitly.
+        connect: static func(host: string, port: u16, config: client-config)
+            -> result<client, tls-error>;
+
+        /// Write plaintext; returns bytes written (may be short).
+        write: func(data: list<u8>) -> result<u32, tls-error>;
+        /// Read plaintext; returns empty list on clean close.
+        read: func(max-bytes: u32) -> result<list<u8>, tls-error>;
+        /// True if OpenSSL has data buffered (decrypted plaintext OR
+        /// unprocessed ciphertext in its BIO) that a subsequent `read`
+        /// can return without blocking on the network. Wraps
+        /// `SSL_has_pending` (OpenSSL ≥1.1.0). Use this to safely drain
+        /// trailing TLS records (e.g. the chunk-end sentinel after the
+        /// final HTTP body record) before close-notify processing
+        /// throws the data away. Distinct from `pending` (count of
+        /// already-decrypted bytes) which our existing `read` already
+        /// covers transparently.
+        has-pending: func() -> bool;
+        /// True if the underlying TCP socket has bytes ready to read.
+        /// Non-blocking POSIX `poll(0)` on `SSL_get_fd`. Catches the case
+        /// where a TLS record sits in the kernel TCP buffer but OpenSSL
+        /// hasn't pulled it into the BIO yet — `has-pending` misses
+        /// those because OpenSSL only sees what's already in its own
+        /// BIO. Together, `has-pending || socket-readable` lets the
+        /// caller safely loop a drain while there's known-available
+        /// data, then return when both are false (server idle on
+        /// keepalive, no record on the wire).
+        socket-readable: func() -> bool;
+        /// File descriptor of the underlying TCP socket. Returns -1 if
+        /// no fd is attached (e.g. handshake failed). Callers can pass
+        /// this to wasi-libc `poll` / `select` for application-level
+        /// readiness probes — the use case is httpx/httpcore which
+        /// poll the socket fd as part of their async event loop and
+        /// connection-alive checks. Owned by openssl-component;
+        /// callers must NOT close or modify the fd directly.
+        socket-fd: func() -> s32;
+
+        /// 0-RTT data; valid only before the first `read`/`write` when
+        /// `enable-early-data` is set and a session ticket is supplied.
+        write-early: func(data: list<u8>) -> result<u32, tls-error>;
+        early-data-accepted: func() -> bool;
+
+        /// Session info for reuse.
+        peer: func() -> peer-info;
+        /// Returns a serialized session ticket if the peer issued one.
+        session-ticket: func() -> option<list<u8>>;
+        /// Full peer cert chain as DER bytes (leaf first, then any
+        /// intermediates the peer sent). Convenience over `peer().peer-
+        /// chain` for callers that just want bytes — see
+        /// `mem-bio-client.peer-chain-der` for the async-mode twin.
+        peer-chain-der: func() -> list<list<u8>>;
+
+        /// Take buffered NSS-format keylog lines. Empty unless
+        /// `keylog` was set in the config.
+        drain-keylog: func() -> list<string>;
+
+        /// Send close_notify and close the underlying socket.
+        close: static func(c: client);
+    }
+
+    resource server-listener {
+        /// Bind to `host:port`. `host` may be "0.0.0.0" or "::".
+        bind: static func(host: string, port: u16, config: server-config)
+            -> result<server-listener, tls-error>;
+        /// Accept one incoming TLS connection.
+        accept: func() -> result<server, tls-error>;
+        /// Port actually bound (useful when caller passed 0).
+        local-port: func() -> u16;
+        close: static func(l: server-listener);
+    }
+
+    resource server {
+        write: func(data: list<u8>) -> result<u32, tls-error>;
+        read: func(max-bytes: u32) -> result<list<u8>, tls-error>;
+        /// Server-side counterpart of `client.has-pending`. See there.
+        has-pending: func() -> bool;
+        /// Server-side counterpart of `client.socket-readable`. See there.
+        socket-readable: func() -> bool;
+        /// Server-side counterpart of `client.socket-fd`. See there.
+        socket-fd: func() -> s32;
+        peer: func() -> peer-info;
+        /// Take buffered NSS-format keylog lines. Empty unless
+        /// `keylog` was set in the listener's server-config.
+        drain-keylog: func() -> list<string>;
+        close: static func(s: server);
+    }
+
+    /// Memory-BIO client. The caller owns the underlying network
+    /// transport (TCP socket, websocket, in-process pipe) and pumps
+    /// ciphertext through `bio-write`/`bio-read`. This is the surface
+    /// async TLS libraries need — anyio's `streams.tls.TLSStream`,
+    /// httpx's async transport, etc. — because they want to drive the
+    /// TLS state machine in step with their own event loop instead of
+    /// blocking inside a libc `read`.
+    ///
+    /// Typical lifecycle:
+    ///   c = mem-bio-client.new(cfg)
+    ///   loop:
+    ///     r = c.do-handshake()
+    ///     if ok: break
+    ///     if would-block:
+    ///       send_to_peer(c.bio-read(N))   // drain outgoing
+    ///       c.bio-write(recv_from_peer()) // inject incoming
+    ///   // post-handshake
+    ///   c.write(plaintext) ; send_to_peer(c.bio-read(N))
+    ///   c.bio-write(recv_from_peer()) ; plaintext = c.read(N)
+    resource mem-bio-client {
+        /// Construct an unconnected TLS client with memory BIOs.
+        /// Configures CTX from `config` (verify mode, trust store,
+        /// SNI, ALPN, ciphers, groups, optional keylog) but does NOT
+        /// touch the network.
+        new: static func(config: client-config)
+            -> result<mem-bio-client, tls-error>;
+
+        /// Drive the handshake forward.
+        /// ok: handshake completed.
+        /// err(would-block): more I/O is needed. Drain bio-read,
+        ///   send those bytes to the peer, then bio-write whatever
+        ///   you receive and call do-handshake again.
+        /// err(handshake-failed | verify-failed | …): fatal.
+        do-handshake: func() -> result<_, tls-error>;
+
+        /// True once `do-handshake` has returned ok.
+        handshake-done: func() -> bool;
+
+        /// Inject ciphertext received from the network. Returns the
+        /// number of bytes accepted (may be short if the internal
+        /// BIO is full — retry after a do-handshake or read).
+        bio-write: func(data: list<u8>) -> u32;
+
+        /// Drain ciphertext the TLS layer wants to send. Empty list
+        /// when nothing is pending. The caller is responsible for
+        /// forwarding the bytes to the peer.
+        bio-read: func(max: u32) -> list<u8>;
+
+        /// Bytes currently buffered for sending.
+        bio-pending: func() -> u32;
+
+        /// Read decrypted plaintext (post-handshake). Same semantics
+        /// as `client.read`; returns empty list on clean close.
+        read: func(max-bytes: u32) -> result<list<u8>, tls-error>;
+
+        /// Write plaintext (post-handshake). Returns bytes written.
+        /// May be short if the internal BIO is full — drain bio-read
+        /// and retry.
+        write: func(data: list<u8>) -> result<u32, tls-error>;
+
+        /// Peer's certificate in DER form (after handshake).
+        peer-cert-der: func() -> option<list<u8>>;
+        /// Negotiated protocol version ("TLSv1.3", …).
+        version: func() -> string;
+        /// Selected ALPN protocol if any.
+        selected-alpn-protocol: func() -> option<string>;
+        /// Full handshake summary (cipher suite, protocol, ALPN, SNI).
+        /// Same shape as `client.peer` for parity — async TLS callers
+        /// (anyio.streams.tls, httpx) inspect protocol/cipher post-
+        /// handshake.
+        peer: func() -> peer-info;
+        /// Full peer cert chain as DER bytes (leaf first, then any
+        /// intermediates the peer sent). Convenience over `peer().peer-
+        /// chain` so callers don't have to round-trip through the
+        /// x509.certificate resource just to get bytes. Empty if no
+        /// handshake yet.
+        peer-chain-der: func() -> list<list<u8>>;
+
+        /// Begin TLS shutdown. Sends a close_notify; the caller
+        /// drains bio-read once more to forward it to the peer.
+        shutdown: func() -> result<_, tls-error>;
+
+        /// Free the resource.
+        close: static func(c: mem-bio-client);
+    }
+}

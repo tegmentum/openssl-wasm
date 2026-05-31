@@ -184,24 +184,65 @@ static int wit_keymgmt_match(const void *a, const void *b, int selection) {
         selection_to_wit(selection)) ? 1 : 0;
 }
 
-// Convert WIT ossl-param (octet-string variant only for now) into an
-// OpenSSL OSSL_PARAM and pass it to OpenSSL's `param_cb` callback.
-// Phase 3.5 only handles octet-string (covers SPKI export); Phase 8
-// will widen.
+// Convert one WIT ossl-param into an OSSL_PARAM and stash it in
+// bld_buf at *bld_n. Handles the variants TLS / cert-build / X.509
+// signing actually use: utf8-string (curve names), octet-string
+// (encoded keys, SPKI), unsigned-integer (bit sizes), integer.
+// Phase 8 extends to big-int + others.
+//
+// CAUTION: the OSSL_PARAM holds pointers into p->value.*. Those
+// pointers must stay live until the consumer copies the values out
+// (which the OSSL_PARAM "set" path does immediately). Caller must
+// not free the WIT list before param_cb returns.
+//
+// Strings stashed by OSSL_PARAM_construct_utf8_string must be NUL-
+// terminated, but our WIT strings are length-only. We patch a NUL
+// byte into the buffer in-place before construction (the WIT runtime
+// always allocates one extra byte for the string sentinel).
 static void emit_ossl_param_to_cb(
         openssl_pkey_pkey_ossl_param_t *p,
         OSSL_CALLBACK *param_cb, void *cbarg, OSSL_PARAM *bld_buf, int *bld_n) {
-    if (p->value.tag == OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_OCTET_STRING) {
-        OSSL_PARAM o = OSSL_PARAM_construct_octet_string(
-            (const char *)p->key.ptr,
+    (void)param_cb; (void)cbarg;
+    // Make the key C-string (NUL-terminate the WIT string in place;
+    // wit-bindgen runtime over-allocates by one byte for this).
+    char *key_c = (char *)p->key.ptr;
+    key_c[p->key.len] = 0;
+
+    switch (p->value.tag) {
+    case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_OCTET_STRING: {
+        bld_buf[*bld_n] = OSSL_PARAM_construct_octet_string(
+            key_c,
             p->value.val.octet_string.ptr,
             p->value.val.octet_string.len);
-        // build into bld_buf
-        bld_buf[*bld_n] = o;
         (*bld_n)++;
+        break;
     }
-    // Phase 8: handle the other variants (integer, big-int, utf8, ...).
-    (void)param_cb; (void)cbarg;
+    case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_UTF8_STRING: {
+        char *val_c = (char *)p->value.val.utf8_string.ptr;
+        val_c[p->value.val.utf8_string.len] = 0;
+        bld_buf[*bld_n] = OSSL_PARAM_construct_utf8_string(
+            key_c, val_c, p->value.val.utf8_string.len);
+        (*bld_n)++;
+        break;
+    }
+    case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_UNSIGNED_INTEGER: {
+        // OSSL_PARAM_construct_size_t / _uint64 needs a pointer to a
+        // size_t/uint64 -- we hand it the WIT field's address.
+        bld_buf[*bld_n] = OSSL_PARAM_construct_uint64(
+            key_c, &p->value.val.unsigned_integer);
+        (*bld_n)++;
+        break;
+    }
+    case OPENSSL_PKEY_PKEY_OSSL_PARAM_VALUE_INTEGER: {
+        bld_buf[*bld_n] = OSSL_PARAM_construct_int64(
+            key_c, &p->value.val.integer);
+        (*bld_n)++;
+        break;
+    }
+    default:
+        // Phase 8: other variants. Skip silently.
+        break;
+    }
 }
 
 static int wit_keymgmt_export(

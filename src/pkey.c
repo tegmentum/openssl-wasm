@@ -10,7 +10,9 @@
 #include <openssl/encoder.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/params.h>
 #include <openssl/pem.h>
+#include <openssl/provider.h>
 #include <openssl/rsa.h>
 
 #define PE_UNSUPPORTED_TYPE  EXPORTS_OPENSSL_COMPONENT_PKEY_PKEY_ERROR_UNSUPPORTED_TYPE
@@ -317,6 +319,63 @@ bool exports_openssl_component_pkey_static_pkey_from_raw_public(
     if (!p) { err->tag = PE_BAD_ENCODING; err->val.internal = ERR_peek_last_error(); return false; }
     *ret = handle_of(p);
     return true;
+}
+
+// Construct an EVP_PKEY backed by the wit-bridge provider for an
+// arbitrary URI. The composed Layer-2 simple-provider-adapter +
+// Layer-3 backend (pkcs11-bridge, webauthn-adapter, ...) decide what
+// the URI means. Private operations on this EVP_PKEY route through
+// the WIT chain. See plans/openssl-provider-wit.md (Phase 5).
+bool exports_openssl_component_pkey_static_pkey_from_wit_bridge_uri(
+        openssl_string_t *uri,
+        exports_openssl_component_pkey_own_pkey_t *ret,
+        exports_openssl_component_pkey_pkey_error_t *err) {
+    OSSL_PROVIDER *def  = NULL;
+    OSSL_PROVIDER *prov = NULL;
+    EVP_PKEY_CTX  *pctx = NULL;
+    EVP_PKEY      *pkey = NULL;
+    char *uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+
+    // Loading wit-bridge disables the default-provider auto-load --
+    // re-load it explicitly so EVP_MD_fetch etc. still find SHA-2.
+    def = OSSL_PROVIDER_load(NULL, "default");
+    if (!def) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!prov) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
+
+    // Phase 5: only EC keys (matching pkcs11-bridge's Phase 4 scope).
+    // Phase 8 will add RSA + Ed25519 detection here, probably by
+    // asking the bridge for the algorithm via a small probe call.
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=wit-bridge");
+    if (!pctx) { err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail; }
+    if (EVP_PKEY_fromdata_init(pctx) <= 0) {
+        err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail;
+    }
+    OSSL_PARAM fd_params[] = {
+        OSSL_PARAM_utf8_string("wit-bridge-uri", uri_c, uri->len),
+        OSSL_PARAM_END,
+    };
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, fd_params) <= 0 || !pkey) {
+        err->tag = PE_INTERNAL; err->val.internal = ERR_peek_last_error(); goto fail;
+    }
+
+    free(uri_c);
+    EVP_PKEY_CTX_free(pctx);
+    // NOTE: we intentionally do NOT unload `prov` or `def` here --
+    // the EVP_PKEY holds references to them via its keymgmt, and
+    // unloading would invalidate operations later. Lifecycle stays
+    // with OpenSSL's auto-unload at libcrypto cleanup time.
+    *ret = handle_of(pkey);
+    return true;
+
+fail:
+    free(uri_c);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(pctx);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    return false;
 }
 
 // Metadata -----------------------------------------------------------------
