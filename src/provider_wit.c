@@ -327,7 +327,10 @@ static const OSSL_PARAM *wit_keymgmt_export_types(int selection) {
 // supports utf8-string and octet-string variants -- enough for the
 // "wit-bridge-uri" param the adapter recognizes plus the usual
 // SPKI/EC-curve params an EVP_PKEY_fromdata caller might pass.
-static void build_wit_params_full(
+// Non-static so encoder_wit.c can reuse it (the keymgmt/encoder/
+// decoder list types all wrap openssl_pkey_pkey_ossl_param_t with
+// identical struct layout, so a pointer cast is safe).
+void build_wit_params_full(
         const OSSL_PARAM params[],
         openssl_keymgmt_keymgmt_list_ossl_param_t *out) {
     if (!params) { out->ptr = NULL; out->len = 0; return; }
@@ -384,7 +387,8 @@ static const OSSL_PARAM *wit_keymgmt_import_types(int selection) {
 // return_size from the WIT value. Returns true on a successful set.
 // Supports utf8-string, octet-string, unsigned-integer (u64 → size_t
 // or unsigned int), integer (s64 → int).
-static bool fill_one_ossl_param(OSSL_PARAM *p,
+// Non-static so encoder_wit.c can reuse it.
+bool fill_one_ossl_param(OSSL_PARAM *p,
                                 openssl_pkey_pkey_ossl_param_t *witp) {
     if (p->key == NULL || witp->key.len == 0) return false;
     if (strlen(p->key) != witp->key.len) return false;

@@ -34,6 +34,16 @@
 
 extern void emit_pkey_error(openssl_pkey_pkey_pkey_error_t *err);
 
+// OSSL_PARAM marshallers shared with provider_wit.c. The encoder list
+// type aliases the keymgmt one (both wrap openssl_pkey_pkey_ossl_param_t
+// with identical struct layout), so we can build a keymgmt-typed list
+// and reinterpret it for the encoder call.
+extern void build_wit_params_full(
+    const OSSL_PARAM params[],
+    openssl_keymgmt_keymgmt_list_ossl_param_t *out);
+extern bool fill_one_ossl_param(
+    OSSL_PARAM *p, openssl_pkey_pkey_ossl_param_t *witp);
+
 #define WIT_MAX_ENCODER_ALGOS 8
 static char           g_encoder_name[WIT_MAX_ENCODER_ALGOS][96];
 static char           g_encoder_propq[WIT_MAX_ENCODER_ALGOS][96];
@@ -92,10 +102,15 @@ static const OSSL_PARAM *wit_encoder_settable_ctx_params(void *provctx) {
     return empty;
 }
 
+// OSSL_FUNC_ENCODER_GET_PARAMS — class-level (no ctx). The encoder's
+// stable properties (output, structure, input) are already advertised
+// via the OSSL_ALGORITHM property string at registration, so this has
+// nothing instance-specific to report. Note: OpenSSL's encoder ABI
+// has SETTABLE/SET_CTX_PARAMS but no GET_CTX_PARAMS counterpart — the
+// per-instance encoder.get-params method on the WIT side stays
+// unreachable from the C bridge until the upstream ABI grows that
+// slot.
 static int wit_encoder_get_params(OSSL_PARAM params[]) {
-    // Phase 8 stub: zero return-size on every requested param so
-    // OpenSSL knows the encoder has nothing to report. Real impl
-    // forwards to ctx.get-params() and copies values across.
     if (params) {
         for (OSSL_PARAM *p = params; p->key; p++) p->return_size = 0;
     }
@@ -105,18 +120,26 @@ static int wit_encoder_get_params(OSSL_PARAM params[]) {
 static int wit_encoder_set_ctx_params(void *ctx, const OSSL_PARAM params[]) {
     wit_encode_ctx_t *c = ctx;
     if (!c || c->marker != WIT_ENCODE_CTX_MARKER) return 0;
-    // Forwarding OSSL_PARAM[] across WIT requires the same per-param
-    // encoder we use for keymgmt set-params (Phase 8c+ work). For
-    // now accept-and-ignore; the WIT side gets an empty list.
-    (void)params;
-    openssl_encoder_encoder_list_ossl_param_t empty = { NULL, 0 };
+
+    // Reuse the keymgmt OSSL_PARAM[] → WIT list marshaller. The
+    // encoder list type is a typedef alias of the keymgmt one
+    // (same struct layout, same element type), so the cast is
+    // memory-safe and avoids duplicating the marshaller.
+    openssl_keymgmt_keymgmt_list_ossl_param_t wp_km;
+    build_wit_params_full(params, &wp_km);
+    openssl_encoder_encoder_list_ossl_param_t wp;
+    wp.ptr = (openssl_encoder_encoder_ossl_param_t *)wp_km.ptr;
+    wp.len = wp_km.len;
+
     openssl_encoder_encoder_pkey_error_t err;
-    if (!openssl_encoder_encoder_method_encode_ctx_set_ctx_params(
-            encode_borrow(c), &empty, &err)) {
-        emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
-        return 0;
-    }
-    return 1;
+    int ok = openssl_encoder_encoder_method_encode_ctx_set_ctx_params(
+        encode_borrow(c), &wp, &err) ? 1 : 0;
+    if (!ok) emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
+    // Free through whichever typed accessor; the underlying alloc came
+    // from build_wit_params_full's plain malloc, so the typed _free
+    // walks the same chain.
+    openssl_encoder_encoder_list_ossl_param_free(&wp);
+    return ok;
 }
 
 static int wit_encoder_does_selection(void *provctx, int selection) {
