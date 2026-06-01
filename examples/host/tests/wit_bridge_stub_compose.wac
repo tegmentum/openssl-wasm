@@ -1,0 +1,33 @@
+// Compose recipe for the wit_bridge.rs smoke tests (sign + encode-SPKI
+// round-trips). Uses stub-key-backend as the Layer-3 backend so the
+// tests don't need SoftHSM or a real PKCS#11 token.
+//
+// noop-provider satisfies the openssl:store/store import that
+// openssl-wasm requires but the wit-bridge stub stack doesn't itself
+// export; the store call path is unused by these tests.
+//
+// Build with examples/host/tests/build_wit_bridge_stack.sh and point
+// the tests at the output via OPENSSL_WASM_COMPONENT=/tmp/full-stack.wasm.
+
+package tegmentum:wit-bridge-stub-compose;
+
+let stub   = new stub-key-backend:component  { ... };
+let simple = new simple-provider-adapter:component {
+  "tegmentum:key-backend/key-backend@0.1.0":
+      stub["tegmentum:key-backend/key-backend@0.1.0"],
+  ...
+};
+let noop = new noop-provider:component { ... };
+
+let openssl = new openssl-wasm:component {
+  "openssl:store/store@0.1.0":         noop["openssl:store/store@0.1.0"],
+  "openssl:pkey/pkey@0.1.0":           simple["openssl:pkey/pkey@0.1.0"],
+  "openssl:provider/provider@0.1.0":   simple["openssl:provider/provider@0.1.0"],
+  "openssl:keymgmt/keymgmt@0.1.0":     simple["openssl:keymgmt/keymgmt@0.1.0"],
+  "openssl:signature/signature@0.1.0": simple["openssl:signature/signature@0.1.0"],
+  "openssl:encoder/encoder@0.1.0":     simple["openssl:encoder/encoder@0.1.0"],
+  "openssl:decoder/decoder@0.1.0":     simple["openssl:decoder/decoder@0.1.0"],
+  ...
+};
+
+export openssl...;

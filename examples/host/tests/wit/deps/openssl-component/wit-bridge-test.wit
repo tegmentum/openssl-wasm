@@ -54,4 +54,15 @@ interface wit-bridge-test {
     key-bits:   u32,
   }
   load-uri-test: func(uri: string) -> result<store-load-result, string>;
+
+  /// Phase 8 ENCODER round-trip. Loads a wit-bridge-managed EVP_PKEY
+  /// for `uri`, then runs OSSL_ENCODER_to_data with structure
+  /// "SubjectPublicKeyInfo" + format "DER". Returns the SPKI bytes
+  /// that the encoder chain produced, or a string error.
+  ///
+  /// Exercises the full pipeline: openssl encoder dispatch ->
+  /// wit_encoder_encode (provider_wit) -> WIT encode method ->
+  /// simple-provider-adapter -> tegmentum:key-backend.public-key-info
+  /// -> bytes flow back through the OSSL_CORE_BIO -> BIO_write path.
+  encode-spki-with-wit-bridge: func(uri: string) -> result<list<u8>, string>;
 }

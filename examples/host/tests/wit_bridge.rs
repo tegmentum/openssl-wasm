@@ -1,18 +1,21 @@
-//! Phase 3 end-to-end gate: drives the `wit-bridge-test`
-//! `sign-with-wit-bridge` export on a composed openssl-wasm +
-//! simple-provider-adapter + stub-key-backend stack, and verifies the
-//! returned signature is cryptographically valid against the stub's
-//! known SPKI using openssl-rs as an independent check.
+//! End-to-end smoke tests for the wit-bridge provider chain:
+//!   - `sign-with-wit-bridge`     (Phase 3 gate): signs through the
+//!     full openssl-wasm + simple-provider-adapter + stub-key-backend
+//!     stack and verifies the signature with openssl-rs against the
+//!     stub's baked SPKI.
+//!   - `encode-spki-with-wit-bridge` (#296c gate): drives
+//!     OSSL_ENCODER_to_data through the same stack and checks the
+//!     returned SubjectPublicKeyInfo bytes match the baked SPKI.
 //!
 //! Set OPENSSL_WASM_COMPONENT to the composed wasm built by:
 //!
-//!   wac plug \
-//!     ~/git/simple-provider-adapter/target/wasm32-wasip2/release/simple_provider_adapter.wasm \
-//!     --plug ~/git/stub-key-backend/target/wasm32-wasip2/release/stub_key_backend.wasm \
-//!     -o /tmp/adapter-with-stub.wasm
-//!   wac plug ~/git/openssl-wasm/build/openssl-component.wasm \
-//!     --plug /tmp/adapter-with-stub.wasm \
-//!     -o /tmp/full-stack.wasm
+//!   bash examples/host/tests/build_wit_bridge_stack.sh
+//!   export OPENSSL_WASM_COMPONENT=/tmp/full-stack.wasm
+//!
+//! The compose recipe lives at
+//! examples/host/tests/wit_bridge_stub_compose.wac. It wires
+//! stub-key-backend as the Layer-3 backend and noop-provider for the
+//! unused openssl:store/store import.
 
 use openssl_wasm_host::{Fixture, exports};
 
@@ -21,8 +24,6 @@ use openssl::ec::{EcKey, EcPoint};
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Public};
-
-use exports::openssl::component::wit_bridge_test;
 
 /// The SPKI DER baked into stub-key-backend's src/lib.rs. Update both
 /// places if you ever regenerate the stub key. The test verifies that
@@ -78,6 +79,34 @@ async fn wit_bridge_sign_round_trip() {
     assert!(ok, "signature did not verify under the stub's SPKI -- \
         the full Layer-1+2+3 chain produced an invalid signature, \
         or the SPKI is desynced from the stub's private key");
+}
+
+/// #296 follow-up: drive the full OSSL_ENCODER chain through the
+/// wit-bridge and verify the returned SPKI bytes match the stub's
+/// known public key. Exercises wit_encoder_encode + simple-provider-
+/// adapter's encoder.encode wired to key.public-key-info.
+#[tokio::test]
+async fn wit_bridge_encode_spki_round_trip() {
+    let mut fx = Fixture::new().await.expect("fixture");
+
+    let uri = "stub://hardcoded".to_string();
+    let result = fx.bindings
+        .openssl_component_wit_bridge_test()
+        .call_encode_spki_with_wit_bridge(&mut fx.store, &uri)
+        .await
+        .expect("wasm call");
+
+    let spki = match result {
+        Ok(s)  => s,
+        Err(e) => panic!("wit-bridge encode-spki failed: {e}"),
+    };
+    assert_eq!(spki, STUB_SPKI_DER,
+        "OSSL_ENCODER_to_data returned SPKI bytes that don't match the stub's baked key. \
+         The encoder chain produced something, but it isn't the public key we expected — \
+         either the C bridge dropped/corrupted bytes, or the adapter is reading the wrong key.");
+    // Independent sanity: openssl-rs must accept what we got back.
+    let _pubkey = PKey::public_key_from_der(&spki)
+        .expect("encoded SPKI should parse as a public key");
 }
 
 /// Sanity: the stub's SPKI parses as a P-256 EC public key.

@@ -104,13 +104,15 @@ static int wit_decoder_does_selection(void *provctx, int selection) {
     return openssl_decoder_decoder_does_selection((uint8_t)(selection & 0xff)) ? 1 : 0;
 }
 
-// Drain a BIO into a heap buffer. Caller frees with OPENSSL_free.
+// Drain an OSSL_CORE_BIO into a heap buffer via the BIO_read_ex core
+// upcall captured in provider_wit.c's OSSL_provider_init. OSSL_CORE_BIO
+// is opaque to providers — see memory ossl-core-bio-upcalls.md for why
+// `BIO_read((BIO *)core_bio)` does not work. Caller frees with
+// OPENSSL_free.
+extern OSSL_FUNC_BIO_read_ex_fn *g_core_bio_read_ex;
+
 static unsigned char *bio_drain(OSSL_CORE_BIO *bio, size_t *out_len) {
-    // OSSL_CORE_BIO uses the upcall table — but openssl-wasm's
-    // bindings link against libssl directly, so BIO_* on a regular
-    // BIO works. The conversion from OSSL_CORE_BIO* to BIO* is
-    // identity in our build (no IPC boundary).
-    BIO *b = (BIO *)bio;
+    if (!g_core_bio_read_ex) return NULL;  // provider_init missed it
     size_t cap = 4096, n = 0;
     unsigned char *buf = OPENSSL_malloc(cap);
     if (!buf) return NULL;
@@ -121,9 +123,10 @@ static unsigned char *bio_drain(OSSL_CORE_BIO *bio, size_t *out_len) {
             if (!nb) { OPENSSL_free(buf); return NULL; }
             buf = nb;
         }
-        int r = BIO_read(b, buf + n, (int)(cap - n));
-        if (r <= 0) break;
-        n += (size_t)r;
+        size_t r = 0;
+        int ok = g_core_bio_read_ex(bio, buf + n, cap - n, &r);
+        if (!ok || r == 0) break;
+        n += r;
     }
     *out_len = n;
     return buf;

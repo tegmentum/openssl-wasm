@@ -50,11 +50,21 @@
 #include <string.h>
 
 // ---------------------------------------------------------------------------
-// Bridge per-instance state.
+// Bridge per-instance state. Cached core upcalls live here so the
+// encoder/decoder bridges can write to / read from the OSSL_CORE_BIO
+// handles OpenSSL passes them — OSSL_CORE_BIO is opaque to providers,
+// so the only sanctioned access path is through these upcalls.
 typedef struct wit_provctx {
     int marker;
+    OSSL_FUNC_BIO_write_ex_fn *core_bio_write_ex;
+    OSSL_FUNC_BIO_read_ex_fn  *core_bio_read_ex;
 } wit_provctx_t;
 #define WIT_PROVCTX_MARKER 0x57495424  // 'WIT$'
+
+// Globals so encoder_wit.c / decoder_wit.c can reach the core upcalls
+// without threading provctx through every dispatch entry.
+OSSL_FUNC_BIO_write_ex_fn *g_core_bio_write_ex = NULL;
+OSSL_FUNC_BIO_read_ex_fn  *g_core_bio_read_ex  = NULL;
 
 // ---------------------------------------------------------------------------
 // C->WIT operation enum translation.
@@ -1041,11 +1051,28 @@ int ossl_wit_provider_init(const OSSL_CORE_HANDLE *handle,
                            const OSSL_DISPATCH **provider_dispatch,
                            void **provctx) {
     (void)handle;
-    (void)core_dispatch;
 
     wit_provctx_t *ctx = malloc(sizeof(*ctx));
     if (ctx == NULL) return 0;
     ctx->marker = WIT_PROVCTX_MARKER;
+    ctx->core_bio_write_ex = NULL;
+    ctx->core_bio_read_ex  = NULL;
+
+    // Walk core_dispatch to fish out the BIO upcalls. OpenSSL's
+    // OSSL_CORE_BIO is opaque to providers; these are the only
+    // legitimate way to write to / read from one.
+    for (const OSSL_DISPATCH *d = core_dispatch; d && d->function_id != 0; d++) {
+        switch (d->function_id) {
+        case OSSL_FUNC_BIO_WRITE_EX:
+            ctx->core_bio_write_ex = OSSL_FUNC_BIO_write_ex(d);
+            g_core_bio_write_ex    = ctx->core_bio_write_ex;
+            break;
+        case OSSL_FUNC_BIO_READ_EX:
+            ctx->core_bio_read_ex  = OSSL_FUNC_BIO_read_ex(d);
+            g_core_bio_read_ex     = ctx->core_bio_read_ex;
+            break;
+        }
+    }
 
     *provctx = ctx;
     *provider_dispatch = wit_provider_dispatch;

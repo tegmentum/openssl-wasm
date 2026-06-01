@@ -28,6 +28,7 @@
 #include <openssl/core_names.h>
 #include <openssl/err.h>
 #include <openssl/params.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -130,6 +131,12 @@ static int wit_encoder_does_selection(void *provctx, int selection) {
     return openssl_encoder_encoder_does_selection((uint8_t)(selection & 0xff)) ? 1 : 0;
 }
 
+// Defined in provider_wit.c; same wrapper for every WIT-managed key.
+typedef struct wit_keydata {
+    int32_t handle;
+    bool    owned;
+} wit_keydata_t;
+
 static int wit_encoder_encode(
         void *ctx, OSSL_CORE_BIO *out,
         const void *obj_raw, const OSSL_PARAM obj_abstract[],
@@ -138,21 +145,44 @@ static int wit_encoder_encode(
     (void)obj_abstract; (void)pw_cb; (void)pw_cbarg;
     wit_encode_ctx_t *c = ctx;
     if (!c || c->marker != WIT_ENCODE_CTX_MARKER || !out) return 0;
-    if (!obj_raw) {
-        // obj_raw=NULL means "encode the abstract object in obj_abstract".
-        // Phase 8: not implemented — most consumers pass a real keydata.
+    if (!obj_raw) return 0;  // abstract-object encode not implemented
+
+    // OpenSSL only routes encoder calls to us when the key's keymgmt
+    // (and propq) match this provider, so obj_raw is one of the
+    // wit_keydata_t wrappers built in provider_wit.c's wit_keymgmt_new.
+    const wit_keydata_t *w = obj_raw;
+    openssl_encoder_encoder_borrow_keydata_t borrow = { .__handle = w->handle };
+
+    uint8_t wit_sel = 0;
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)       wit_sel |= 0x01;
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)        wit_sel |= 0x02;
+    if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) wit_sel |= 0x04;
+    if (selection & OSSL_KEYMGMT_SELECT_OTHER_PARAMETERS)  wit_sel |= 0x08;
+
+    openssl_list_u8_t encoded = { NULL, 0 };
+    openssl_encoder_encoder_pkey_error_t err;
+    bool ok = openssl_encoder_encoder_method_encode_ctx_encode(
+        encode_borrow(c), borrow, wit_sel, &encoded, &err);
+    if (!ok) {
+        emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
         return 0;
     }
 
-    // The Layer-2 adapter is responsible for wrapping the C `obj_raw`
-    // (= EVP_PKEY *) into a WIT keydata handle. simple-provider-adapter
-    // stores the WIT handle inside the EVP_PKEY's provider-data; we
-    // recover it here via a known accessor (Phase 8 Session 3 wires
-    // this).
-    //
-    // Until then return 0 so OpenSSL falls back to its built-in
-    // encoders.
-    return 0;
+    extern OSSL_FUNC_BIO_write_ex_fn *g_core_bio_write_ex;
+    int rc = 1;
+    if (encoded.len > 0) {
+        if (!g_core_bio_write_ex) {
+            rc = 0;  // provider_init failed to capture the upcall
+        } else {
+            size_t written = 0;
+            if (!g_core_bio_write_ex(out, encoded.ptr, encoded.len, &written)
+                || written != encoded.len) {
+                rc = 0;
+            }
+        }
+    }
+    openssl_list_u8_free(&encoded);
+    return rc;
 }
 
 const OSSL_DISPATCH wit_encoder_dispatch[] = {

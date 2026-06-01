@@ -26,6 +26,7 @@
 #include "bindings/openssl.h"
 #include "include/support.h"
 
+#include <openssl/encoder.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/params.h>
@@ -442,6 +443,81 @@ bool exports_openssl_component_wit_bridge_test_load_uri_test(
 
 done:
     if (sctx) OSSL_STORE_close(sctx);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    free(uri_c);
+    return ok;
+}
+
+// ===========================================================================
+// Phase 8 follow-up (#296): exercise the OSSL_ENCODER chain through the
+// wit-bridge. Build a wit-bridge-managed EVP_PKEY from `uri`, then run
+// OSSL_ENCODER_to_data with SubjectPublicKeyInfo + DER. Returns the
+// SPKI bytes the encoder produced.
+// ===========================================================================
+bool exports_openssl_component_wit_bridge_test_encode_spki_with_wit_bridge(
+        openssl_string_t *uri,
+        openssl_list_u8_t *ret,
+        openssl_string_t *err) {
+    bool ok = false;
+    OSSL_PROVIDER *def = NULL, *prov = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = NULL;
+    OSSL_ENCODER_CTX *ectx = NULL;
+    unsigned char *out = NULL;
+    size_t out_len = 0;
+    char *uri_c = NULL;
+
+    uri_c = xmalloc(uri->len + 1);
+    memcpy(uri_c, uri->ptr, uri->len); uri_c[uri->len] = 0;
+
+    def  = OSSL_PROVIDER_load(NULL, "default");
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!def || !prov) { evp_err(err, "OSSL_PROVIDER_load"); goto done; }
+
+    pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=wit-bridge");
+    if (!pctx) { evp_err(err, "EVP_PKEY_CTX_new_from_name"); goto done; }
+    if (EVP_PKEY_fromdata_init(pctx) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata_init"); goto done;
+    }
+    OSSL_PARAM fd_params[] = {
+        OSSL_PARAM_utf8_string("wit-bridge-uri", uri_c, uri->len),
+        OSSL_PARAM_END,
+    };
+    // Phase 8 encode is PUBLIC_KEY only, but the keymgmt.load path
+    // needs a selection that succeeds — KEYPAIR is what fromdata uses
+    // elsewhere in this file, and the import_types_ex doesn't gate it.
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, fd_params) <= 0) {
+        evp_err(err, "EVP_PKEY_fromdata"); goto done;
+    }
+    if (!pkey) { openssl_string_dup(err, "EVP_PKEY_fromdata: null pkey"); goto done; }
+
+    ectx = OSSL_ENCODER_CTX_new_for_pkey(
+        pkey, EVP_PKEY_PUBLIC_KEY, "DER", "SubjectPublicKeyInfo",
+        "provider=wit-bridge");
+    if (!ectx) { evp_err(err, "OSSL_ENCODER_CTX_new_for_pkey"); goto done; }
+    if (OSSL_ENCODER_CTX_get_num_encoders(ectx) == 0) {
+        openssl_string_dup(err,
+            "OSSL_ENCODER_CTX_new_for_pkey: no encoders matched "
+            "(query-operation didn't advertise the SPKI encoder)");
+        goto done;
+    }
+    if (OSSL_ENCODER_to_data(ectx, &out, &out_len) <= 0) {
+        evp_err(err, "OSSL_ENCODER_to_data"); goto done;
+    }
+    if (!out || out_len == 0) {
+        openssl_string_dup(err, "OSSL_ENCODER_to_data: empty output"); goto done;
+    }
+
+    ret->ptr = out; ret->len = out_len;
+    out = NULL;  // ownership handed off
+    ok = true;
+
+done:
+    OPENSSL_free(out);
+    OSSL_ENCODER_CTX_free(ectx);
+    EVP_PKEY_CTX_free(pctx);
+    EVP_PKEY_free(pkey);
     if (prov) OSSL_PROVIDER_unload(prov);
     if (def)  OSSL_PROVIDER_unload(def);
     free(uri_c);
