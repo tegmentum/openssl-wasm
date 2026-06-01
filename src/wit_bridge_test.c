@@ -597,3 +597,101 @@ done:
     if (def)  OSSL_PROVIDER_unload(def);
     return ok;
 }
+
+// ===========================================================================
+// #4 follow-up: decoder round-trip. Drives the WIT decoder directly
+// (skipping OpenSSL's decoder framework — that integration is a
+// separate ticket because OSSL_OBJECT_PARAM_REFERENCE plumbing has
+// lifetime considerations). The flow:
+//
+//   1. decode_ctx.constructor()
+//   2. decode(spki, PUBLIC_KEY) -> [Key(keydata)]
+//   3. export_object(keydata)   -> [OsslParam] (group+pub for EC, n+e for RSA)
+//   4. encode_ctx.constructor()
+//   5. encoder.import_object(PUBLIC_KEY, params) -> Keydata'
+//   6. encoder.encode(Keydata', PUBLIC_KEY) -> reassembled SPKI
+//
+// Successful round-trip means parse + export + re-import + re-encode
+// all agree on the same param shape.
+// ===========================================================================
+bool exports_openssl_component_wit_bridge_test_decode_spki_round_trip_with_wit_bridge(
+        openssl_list_u8_t *spki,
+        openssl_list_u8_t *ret,
+        openssl_string_t *err) {
+    bool ok = false;
+    openssl_decoder_decoder_own_decode_ctx_t dctx =
+        openssl_decoder_decoder_constructor_decode_ctx();
+    openssl_decoder_decoder_borrow_decode_ctx_t dctx_b = { .__handle = dctx.__handle };
+    openssl_encoder_encoder_own_encode_ctx_t ectx =
+        openssl_encoder_encoder_constructor_encode_ctx();
+    openssl_encoder_encoder_borrow_encode_ctx_t ectx_b = { .__handle = ectx.__handle };
+
+    openssl_list_u8_t input = { spki->ptr, spki->len };
+    openssl_decoder_decoder_list_decoded_object_t decoded = { NULL, 0 };
+    openssl_decoder_decoder_pkey_error_t dec_err;
+    if (!openssl_decoder_decoder_method_decode_ctx_decode(
+            dctx_b, &input, 0x02 /*PUBLIC_KEY*/, &decoded, &dec_err)) {
+        set_err_from_wit(err, "decoder.decode",
+            (openssl_pkey_pkey_pkey_error_t *)&dec_err);
+        goto done;
+    }
+    if (decoded.len != 1 ||
+        decoded.ptr[0].tag != OPENSSL_DECODER_DECODER_DECODED_OBJECT_KEY) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+            "decoder.decode: expected exactly one Key result, got len=%zu tag=%d",
+            decoded.len, decoded.len > 0 ? (int)decoded.ptr[0].tag : -1);
+        openssl_string_dup(err, buf);
+        goto done;
+    }
+    openssl_decoder_decoder_borrow_keydata_t dec_kd_b = {
+        .__handle = decoded.ptr[0].val.key.__handle,
+    };
+    openssl_decoder_decoder_list_ossl_param_t exported = { NULL, 0 };
+    openssl_decoder_decoder_pkey_error_t exp_err;
+    if (!openssl_decoder_decoder_method_decode_ctx_export_object(
+            dctx_b, dec_kd_b, &exported, &exp_err)) {
+        set_err_from_wit(err, "decoder.export-object",
+            (openssl_pkey_pkey_pkey_error_t *)&exp_err);
+        goto done;
+    }
+
+    // Hand the same param list to encoder.import-object (the encoder
+    // list type is a typedef alias, so reinterpret-cast is safe).
+    openssl_encoder_encoder_list_ossl_param_t imp_params;
+    imp_params.ptr = (openssl_encoder_encoder_ossl_param_t *)exported.ptr;
+    imp_params.len = exported.len;
+    openssl_encoder_encoder_own_keydata_t imp_kd;
+    openssl_encoder_encoder_pkey_error_t imp_err;
+    if (!openssl_encoder_encoder_method_encode_ctx_import_object(
+            ectx_b, 0x02 /*PUBLIC_KEY*/, &imp_params, &imp_kd, &imp_err)) {
+        // Note: imp_params shares buffers with `exported`; the free
+        // call below owns the cleanup.
+        set_err_from_wit(err, "encoder.import-object",
+            (openssl_pkey_pkey_pkey_error_t *)&imp_err);
+        openssl_decoder_decoder_list_ossl_param_free(&exported);
+        goto done;
+    }
+    openssl_decoder_decoder_list_ossl_param_free(&exported);
+
+    openssl_encoder_encoder_borrow_keydata_t imp_kd_b = { .__handle = imp_kd.__handle };
+    openssl_list_u8_t reassembled = { NULL, 0 };
+    openssl_encoder_encoder_pkey_error_t enc_err;
+    bool enc_ok = openssl_encoder_encoder_method_encode_ctx_encode(
+        ectx_b, imp_kd_b, 0x02 /*PUBLIC_KEY*/, &reassembled, &enc_err);
+    openssl_keymgmt_keymgmt_keydata_drop_own(imp_kd);
+    if (!enc_ok) {
+        set_err_from_wit(err, "encoder.encode",
+            (openssl_pkey_pkey_pkey_error_t *)&enc_err);
+        goto done;
+    }
+    ret->ptr = reassembled.ptr;
+    ret->len = reassembled.len;
+    ok = true;
+
+done:
+    openssl_decoder_decoder_list_decoded_object_free(&decoded);
+    openssl_decoder_decoder_decode_ctx_drop_own(dctx);
+    openssl_encoder_encoder_encode_ctx_drop_own(ectx);
+    return ok;
+}

@@ -73,4 +73,18 @@ interface wit-bridge-test {
   /// default-provider key's params, hands them to our import_object,
   /// then encode runs on the resulting WIT keydata.
   encode-spki-cross-provider: func() -> result<list<u8>, string>;
+
+  /// Decoder round-trip test (#4). Calls the wit-bridge decoder
+  /// directly on `spki` (skipping OpenSSL's decoder framework since
+  /// we're testing the WIT contract, not OSSL plumbing), runs
+  /// decoder.export-object on the resulting Keydata, then asks the
+  /// wit-bridge encoder.import-object to re-assemble SPKI from the
+  /// exported params. Returns the regenerated SPKI bytes.
+  ///
+  /// Exercises: decoder.decode (SPKI parse) + decoder.export-object
+  /// (param emission) + encoder.import-object (SPKI rebuild). A
+  /// successful round-trip means all three stages agree on the
+  /// param shape.
+  decode-spki-round-trip-with-wit-bridge: func(spki: list<u8>)
+      -> result<list<u8>, string>;
 }

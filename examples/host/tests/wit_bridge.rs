@@ -144,6 +144,64 @@ async fn wit_bridge_encode_spki_cross_provider() {
         "wit-bridge SPKI doesn't match openssl's canonical encoding");
 }
 
+/// #4 follow-up: decoder round-trip. Generates a P-256 keypair on
+/// the default provider, encodes it as SPKI DER via openssl-rs, then
+/// hands the bytes to the wit-bridge's decoder. The wasm side runs
+/// decode → export-object → encoder.import-object → encoder.encode
+/// and returns the re-assembled SPKI. We assert bit-equality vs the
+/// input — proves the decoder's param shape agrees with the
+/// encoder's import expectations.
+#[tokio::test]
+async fn wit_bridge_decode_spki_round_trip() {
+    use openssl::ec::{EcGroup, EcKey};
+
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+    let ec    = EcKey::generate(&group).unwrap();
+    let pkey  = PKey::from_ec_key(ec).unwrap();
+    let spki  = pkey.public_key_to_der().unwrap();
+
+    let mut fx = Fixture::new().await.expect("fixture");
+    let result = fx.bindings
+        .openssl_component_wit_bridge_test()
+        .call_decode_spki_round_trip_with_wit_bridge(&mut fx.store, &spki)
+        .await
+        .expect("wasm call");
+
+    let reassembled = match result {
+        Ok(s)  => s,
+        Err(e) => panic!("decoder round-trip failed: {e}"),
+    };
+    assert_eq!(reassembled, spki,
+        "wit-bridge decode→export→re-import→re-encode didn't round-trip cleanly. \
+         Either decoder.export-object emitted params the encoder.import-object can't \
+         consume, or one stage corrupted the SEC1 point bytes.");
+}
+
+/// #4: round-trip an RSA SPKI too. Catches per-algorithm divergence
+/// in decoder.decode (n/e param keys, BIT STRING parsing of the
+/// inner RSAPublicKey SEQUENCE).
+#[tokio::test]
+async fn wit_bridge_decode_spki_round_trip_rsa() {
+    use openssl::rsa::Rsa;
+
+    let rsa  = Rsa::generate(2048).unwrap();
+    let pkey = PKey::from_rsa(rsa).unwrap();
+    let spki = pkey.public_key_to_der().unwrap();
+
+    let mut fx = Fixture::new().await.expect("fixture");
+    let result = fx.bindings
+        .openssl_component_wit_bridge_test()
+        .call_decode_spki_round_trip_with_wit_bridge(&mut fx.store, &spki)
+        .await
+        .expect("wasm call");
+    let reassembled = match result {
+        Ok(s)  => s,
+        Err(e) => panic!("RSA decoder round-trip failed: {e}"),
+    };
+    assert_eq!(reassembled, spki,
+        "RSA SPKI didn't round-trip through wit-bridge decode/export/import/encode");
+}
+
 /// Sanity: the stub's SPKI parses as a P-256 EC public key.
 #[test]
 fn stub_spki_is_p256() {
