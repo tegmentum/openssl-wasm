@@ -109,6 +109,41 @@ async fn wit_bridge_encode_spki_round_trip() {
         .expect("encoded SPKI should parse as a public key");
 }
 
+/// #3 follow-up: cross-provider encode. The wasm side generates an
+/// EC key on the default provider, then explicitly forces the
+/// wit-bridge SPKI encoder via propq. OpenSSL routes through
+/// OSSL_FUNC_ENCODER_IMPORT_OBJECT → simple-provider-adapter →
+/// spki::build_ec_spki. The returned bytes must parse as a P-256
+/// public key and round-trip back to the same DER.
+#[tokio::test]
+async fn wit_bridge_encode_spki_cross_provider() {
+    let mut fx = Fixture::new().await.expect("fixture");
+    let result = fx.bindings
+        .openssl_component_wit_bridge_test()
+        .call_encode_spki_cross_provider(&mut fx.store)
+        .await
+        .expect("wasm call");
+
+    let spki = match result {
+        Ok(s)  => s,
+        Err(e) => panic!("cross-provider encode failed: {e}"),
+    };
+
+    let pubkey = PKey::public_key_from_der(&spki)
+        .expect("cross-provider SPKI should parse as a public key");
+    let ec = pubkey.ec_key().expect("EC public key");
+    let name = ec.group().curve_name().expect("named curve");
+    assert_eq!(name, Nid::X9_62_PRIME256V1,
+        "cross-provider encoder should emit P-256 SPKI");
+
+    // Round-trip: re-encode via openssl-rs and compare. This catches
+    // any DER framing bug in spki::build_ec_spki (wrong tag, off-by-
+    // one length, missing BIT STRING unused-bits byte, etc.).
+    let canonical = ec.public_key_to_der().expect("re-encode");
+    assert_eq!(canonical, spki,
+        "wit-bridge SPKI doesn't match openssl's canonical encoding");
+}
+
 /// Sanity: the stub's SPKI parses as a P-256 EC public key.
 #[test]
 fn stub_spki_is_p256() {

@@ -523,3 +523,77 @@ done:
     free(uri_c);
     return ok;
 }
+
+// ===========================================================================
+// #3 follow-up: cross-provider encode. Generate an EC key via the
+// DEFAULT provider (its own keymgmt manages the key), then explicitly
+// fetch the wit-bridge's SPKI encoder by property. OpenSSL's encoder
+// framework recognises the keymgmt mismatch, calls our
+// OSSL_FUNC_ENCODER_IMPORT_OBJECT to convert the default-provider
+// keydata into a wit-bridge-managed handle, and encode runs on that.
+// ===========================================================================
+bool exports_openssl_component_wit_bridge_test_encode_spki_cross_provider(
+        openssl_list_u8_t *ret,
+        openssl_string_t *err) {
+    bool ok = false;
+    OSSL_PROVIDER *def = NULL, *prov = NULL;
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *gctx = NULL;
+    OSSL_ENCODER_CTX *ectx = NULL;
+    unsigned char *out = NULL;
+    size_t out_len = 0;
+
+    def  = OSSL_PROVIDER_load(NULL, "default");
+    prov = OSSL_PROVIDER_load(NULL, "wit-bridge");
+    if (!def || !prov) { evp_err(err, "OSSL_PROVIDER_load"); goto done; }
+
+    // Generate a P-256 EC key on the DEFAULT provider. The resulting
+    // EVP_PKEY's keymgmt is default's, not ours.
+    gctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", "provider=default");
+    if (!gctx) { evp_err(err, "EVP_PKEY_CTX_new_from_name(EC,default)"); goto done; }
+    if (EVP_PKEY_keygen_init(gctx) <= 0) { evp_err(err, "EVP_PKEY_keygen_init"); goto done; }
+    OSSL_PARAM kp[] = {
+        OSSL_PARAM_utf8_string("group", (char *)"P-256", 0),
+        OSSL_PARAM_END,
+    };
+    if (EVP_PKEY_CTX_set_params(gctx, kp) <= 0) {
+        evp_err(err, "EVP_PKEY_CTX_set_params(group)"); goto done;
+    }
+    if (EVP_PKEY_generate(gctx, &pkey) <= 0) {
+        evp_err(err, "EVP_PKEY_generate"); goto done;
+    }
+    if (!pkey) { openssl_string_dup(err, "EVP_PKEY_generate: null pkey"); goto done; }
+
+    // Force the wit-bridge encoder by propq, ignoring the (better-
+    // matched) default-provider SPKI encoder. The framework will
+    // detect the keymgmt mismatch and call our import_object.
+    ectx = OSSL_ENCODER_CTX_new_for_pkey(
+        pkey, EVP_PKEY_PUBLIC_KEY, "DER", "SubjectPublicKeyInfo",
+        "provider=wit-bridge");
+    if (!ectx) { evp_err(err, "OSSL_ENCODER_CTX_new_for_pkey"); goto done; }
+    if (OSSL_ENCODER_CTX_get_num_encoders(ectx) == 0) {
+        openssl_string_dup(err,
+            "OSSL_ENCODER_CTX_new_for_pkey: 0 wit-bridge encoders matched "
+            "(import_object slot not advertised?)");
+        goto done;
+    }
+    if (OSSL_ENCODER_to_data(ectx, &out, &out_len) <= 0) {
+        evp_err(err, "OSSL_ENCODER_to_data"); goto done;
+    }
+    if (!out || out_len == 0) {
+        openssl_string_dup(err, "OSSL_ENCODER_to_data: empty output"); goto done;
+    }
+
+    ret->ptr = out; ret->len = out_len;
+    out = NULL;
+    ok = true;
+
+done:
+    OPENSSL_free(out);
+    OSSL_ENCODER_CTX_free(ectx);
+    EVP_PKEY_CTX_free(gctx);
+    EVP_PKEY_free(pkey);
+    if (prov) OSSL_PROVIDER_unload(prov);
+    if (def)  OSSL_PROVIDER_unload(def);
+    return ok;
+}

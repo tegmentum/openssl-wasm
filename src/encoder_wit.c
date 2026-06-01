@@ -208,6 +208,54 @@ static int wit_encoder_encode(
     return rc;
 }
 
+// OSSL_FUNC_ENCODER_IMPORT_OBJECT: cross-provider encode entry point.
+// OpenSSL calls this when the source EVP_PKEY's keymgmt isn't ours;
+// the framework hands us the foreign key's exported public-key
+// OSSL_PARAMs, we route them to encoder.import-object on the WIT
+// side, and return a wit_keydata_t* that subsequent encode + free
+// calls operate on.
+static void *wit_encoder_import_object(void *ctx, int selection,
+                                       const OSSL_PARAM params[]) {
+    wit_encode_ctx_t *c = ctx;
+    if (!c || c->marker != WIT_ENCODE_CTX_MARKER) return NULL;
+
+    openssl_keymgmt_keymgmt_list_ossl_param_t wp_km;
+    build_wit_params_full(params, &wp_km);
+    openssl_encoder_encoder_list_ossl_param_t wp;
+    wp.ptr = (openssl_encoder_encoder_ossl_param_t *)wp_km.ptr;
+    wp.len = wp_km.len;
+
+    openssl_encoder_encoder_own_keydata_t handle;
+    openssl_encoder_encoder_pkey_error_t err;
+    bool ok = openssl_encoder_encoder_method_encode_ctx_import_object(
+        encode_borrow(c), (uint8_t)(selection & 0xff), &wp, &handle, &err);
+    openssl_encoder_encoder_list_ossl_param_free(&wp);
+    if (!ok) {
+        emit_pkey_error((openssl_pkey_pkey_pkey_error_t *)&err);
+        return NULL;
+    }
+    wit_keydata_t *w = OPENSSL_malloc(sizeof(*w));
+    if (!w) {
+        // encoder own-keydata is a typedef of keymgmt own-keydata, so
+        // its drop function lives under the keymgmt namespace.
+        openssl_keymgmt_keymgmt_keydata_drop_own(handle);
+        return NULL;
+    }
+    w->handle = handle.__handle;
+    w->owned  = true;
+    return w;
+}
+
+static void wit_encoder_free_object(void *obj) {
+    wit_keydata_t *w = obj;
+    if (!w) return;
+    if (w->owned) {
+        openssl_keymgmt_keymgmt_own_keydata_t h = { .__handle = w->handle };
+        openssl_keymgmt_keymgmt_keydata_drop_own(h);
+    }
+    OPENSSL_free(w);
+}
+
 const OSSL_DISPATCH wit_encoder_dispatch[] = {
     { OSSL_FUNC_ENCODER_NEWCTX,              (void (*)(void))wit_encoder_newctx },
     { OSSL_FUNC_ENCODER_FREECTX,             (void (*)(void))wit_encoder_freectx },
@@ -216,6 +264,8 @@ const OSSL_DISPATCH wit_encoder_dispatch[] = {
     { OSSL_FUNC_ENCODER_SET_CTX_PARAMS,      (void (*)(void))wit_encoder_set_ctx_params },
     { OSSL_FUNC_ENCODER_SETTABLE_CTX_PARAMS, (void (*)(void))wit_encoder_settable_ctx_params },
     { OSSL_FUNC_ENCODER_DOES_SELECTION,      (void (*)(void))wit_encoder_does_selection },
+    { OSSL_FUNC_ENCODER_IMPORT_OBJECT,       (void (*)(void))wit_encoder_import_object },
+    { OSSL_FUNC_ENCODER_FREE_OBJECT,         (void (*)(void))wit_encoder_free_object },
     { OSSL_FUNC_ENCODER_ENCODE,              (void (*)(void))wit_encoder_encode },
     { 0, NULL },
 };

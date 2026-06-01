@@ -65,4 +65,12 @@ interface wit-bridge-test {
   /// simple-provider-adapter -> tegmentum:key-backend.public-key-info
   /// -> bytes flow back through the OSSL_CORE_BIO -> BIO_write path.
   encode-spki-with-wit-bridge: func(uri: string) -> result<list<u8>, string>;
+
+  /// Cross-provider encode test (#3): build an EC EVP_PKEY via the
+  /// DEFAULT provider (no wit-bridge keymgmt involved), then ask the
+  /// wit-bridge's encoder to emit SubjectPublicKeyInfo DER. Exercises
+  /// the OSSL_FUNC_ENCODER_IMPORT_OBJECT path: framework exports the
+  /// default-provider key's params, hands them to our import_object,
+  /// then encode runs on the resulting WIT keydata.
+  encode-spki-cross-provider: func() -> result<list<u8>, string>;
 }
