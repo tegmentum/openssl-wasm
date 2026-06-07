@@ -320,4 +320,94 @@ interface tls {
         /// Free the resource.
         close: static func(c: mem-bio-client);
     }
+
+    /// Memory-BIO server. The server-side counterpart of `mem-bio-client`:
+    /// the caller owns the underlying transport and pumps ciphertext
+    /// through `bio-write`/`bio-read`. Internally configured with
+    /// `SSL_set_accept_state` so `do-handshake` drives the server side
+    /// of the handshake.
+    ///
+    /// Use case: in-memory TLS loopback (paired with a `mem-bio-client`
+    /// in the same process), browserless integration tests, async TLS
+    /// transports that own the network themselves. The component never
+    /// touches a socket.
+    ///
+    /// Lifecycle mirrors `mem-bio-client`:
+    ///   s = mem-bio-server.new(cfg)
+    ///   loop:
+    ///     r = s.do-handshake()
+    ///     if ok: break
+    ///     if would-block:
+    ///       send_to_peer(s.bio-read(N))   // drain outgoing
+    ///       s.bio-write(recv_from_peer()) // inject incoming
+    ///   // post-handshake
+    ///   plaintext = s.read(N) ; send_to_peer(s.bio-read(N))
+    ///   s.bio-write(recv_from_peer()) ; s.write(plaintext)
+    resource mem-bio-server {
+        /// Construct an unconnected TLS server with memory BIOs.
+        /// Configures CTX from `config` (cert-chain + key required,
+        /// optional client-trust for mTLS, ALPN, ciphers, groups,
+        /// optional keylog). Does NOT touch the network.
+        ///
+        /// session-tickets / sni-hosts fields of server-config are
+        /// accepted for API parity with the socket-attached `server`
+        /// but their effect on the mem-BIO path is implementation-
+        /// defined; rely on them only after explicit empirical
+        /// validation.
+        new: static func(config: server-config)
+            -> result<mem-bio-server, tls-error>;
+
+        /// Drive the handshake forward.
+        /// ok: handshake completed.
+        /// err(would-block): more I/O is needed. Drain bio-read,
+        ///   send those bytes to the peer, then bio-write whatever
+        ///   you receive and call do-handshake again.
+        /// err(handshake-failed | verify-failed | …): fatal.
+        do-handshake: func() -> result<_, tls-error>;
+
+        /// True once `do-handshake` has returned ok.
+        handshake-done: func() -> bool;
+
+        /// Inject ciphertext received from the network.
+        bio-write: func(data: list<u8>) -> u32;
+
+        /// Drain ciphertext the TLS layer wants to send.
+        bio-read: func(max: u32) -> list<u8>;
+
+        /// Bytes currently buffered for sending.
+        bio-pending: func() -> u32;
+
+        /// Read decrypted plaintext (post-handshake).
+        read: func(max-bytes: u32) -> result<list<u8>, tls-error>;
+
+        /// Write plaintext (post-handshake). Returns bytes written.
+        write: func(data: list<u8>) -> result<u32, tls-error>;
+
+        /// Peer's certificate in DER form (after handshake). For a
+        /// server this is the *client* cert; returns None when the
+        /// client did not present one (the common case unless mTLS
+        /// is configured via verify-mode + client-trust).
+        peer-cert-der: func() -> option<list<u8>>;
+
+        /// Negotiated protocol version ("TLSv1.3", …).
+        version: func() -> string;
+
+        /// Selected ALPN protocol if any.
+        selected-alpn-protocol: func() -> option<string>;
+
+        /// Full handshake summary (cipher suite, protocol, ALPN, SNI).
+        /// Mirrors `mem-bio-client.peer`.
+        peer: func() -> peer-info;
+
+        /// Full peer (client) cert chain as DER bytes. Empty unless
+        /// the client presented a chain (mTLS).
+        peer-chain-der: func() -> list<list<u8>>;
+
+        /// Begin TLS shutdown. Sends a close_notify; the caller
+        /// drains bio-read once more to forward it to the peer.
+        shutdown: func() -> result<_, tls-error>;
+
+        /// Free the resource.
+        close: static func(s: mem-bio-server);
+    }
 }
